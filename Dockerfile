@@ -1,4 +1,7 @@
 # Amazing Marvin MCP server (HTTP mode).
+# Fail closed: the container refuses to start without MCP_AUTH_TOKEN
+# (or MCP_AUTH_TOKEN_FILE); set MCP_ALLOW_UNAUTHENTICATED=true only for
+# deliberate localhost experiments.
 FROM python:3.12-slim
 
 # Non-root user. /data holds the persisted rate-limit counter; pre-chown

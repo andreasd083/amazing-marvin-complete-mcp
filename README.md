@@ -86,8 +86,12 @@ MCP_TRANSPORT=http PORT=8787 MCP_AUTH_TOKEN_FILE=/path/to/token \
 MARVIN_API_TOKEN_FILE=/path/to/api-token .venv/bin/marvin-mcp
 ```
 
-The MCP endpoint is `/mcp`. The built-in bearer check (`MCP_AUTH_TOKEN`)
-protects every path but is an internal barrier, not a complete auth story:
+The MCP endpoint is `/mcp`. HTTP mode **fails closed**: without
+`MCP_AUTH_TOKEN` (or `MCP_AUTH_TOKEN_FILE`) the server refuses to start,
+with instructions in the error message; set `MCP_ALLOW_UNAUTHENTICATED=true`
+only to deliberately run an open instance on localhost. The built-in bearer
+check protects every path but is an internal barrier, not a complete auth
+story:
 put a reverse proxy with TLS in front, and for Claude custom connectors an
 OAuth 2.1-capable MCP auth proxy. A `Dockerfile` for HTTP mode is included
 (runs as a non-root user; mount a volume on `/data` to persist the daily

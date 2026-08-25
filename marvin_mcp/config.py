@@ -58,6 +58,8 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8787
     state_dir: Path = Path.home() / ".marvin-mcp"
+    # Explicit opt-out from the fail-closed HTTP check (MCP_ALLOW_UNAUTHENTICATED).
+    allow_unauthenticated: bool = False
 
     def __repr__(self) -> str:  # mask all token fields
         return (
@@ -80,4 +82,8 @@ def load_settings() -> Settings:
         state_dir=Path(
             os.environ.get("STATE_DIR", str(Path.home() / ".marvin-mcp"))
         ),
+        allow_unauthenticated=os.environ.get("MCP_ALLOW_UNAUTHENTICATED", "")
+        .strip()
+        .lower()
+        in ("1", "true", "yes"),
     )
