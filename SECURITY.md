@@ -36,6 +36,8 @@ never accepts unauthenticated traffic.
 
 ## Reporting
 
-This project is provided as-is and is not actively maintained. If you find
-a security problem, feel free to open a pull request — but expect to fork
-rather than wait.
+If you find a security problem, please open a GitHub issue (or a pull
+request). Describe the class of problem and how to reproduce it — never
+include real tokens or other secrets in the report. This is a side project
+maintained when time allows, so response times vary, but security reports
+get looked at.

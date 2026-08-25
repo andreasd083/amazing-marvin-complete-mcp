@@ -9,8 +9,13 @@ tool descriptions was verified against the live API — the findings are
 documented below in [Marvin API quirks & findings](#marvin-api-quirks--findings),
 which may be useful even if you never run this server.
 
-> **Provided as-is.** This project is not actively maintained and comes with
-> no support. Issues are disabled on purpose. Fork freely — it's MIT.
+> **Maintenance status:** Bug reports are welcome and appreciated — they
+> help keep this working for everyone. Please note this is a side project
+> maintained when time allows: bug reports get looked at, but response
+> times vary and feature requests are unlikely to be picked up. For
+> installation help, paste this README into your AI assistant — it can walk
+> you through setup and troubleshooting far faster than I can. Provided
+> as-is, without guarantees — it's MIT, fork freely.
 
 ## Tools (34)
 
