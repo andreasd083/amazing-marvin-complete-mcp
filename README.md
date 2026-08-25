@@ -25,9 +25,11 @@ which may be useful even if you never run this server.
 | Kudos/rewards | `get_kudos`, `claim_reward_points`, `unclaim_reward_points`, `spend_reward_points`, `reset_reward_points` |
 | Misc | `get_labels`, `get_goals`, `get_reminders`, `set_reminder`, `delete_reminder`, `create_event` (experimental), `get_account_info`, `get_rate_limit_status` |
 
-Deliberately **not** included: Smart List / task-picking logic. Marvin's own
+Deliberately **not** included: Smart List / task-picking logic (Marvin's own
 Spotlight does the picking; the server gives your assistant hands, not
-opinions.
+opinions), and the `/reminder/deleteAll` endpoint — the one documented
+endpoint without a tool, deliberately: it wipes every reminder in a single
+call and `delete_reminder` already covers targeted cleanup.
 
 Every tool carries [MCP tool annotations](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations)
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) so

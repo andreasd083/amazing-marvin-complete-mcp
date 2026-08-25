@@ -2,8 +2,7 @@
 
 - Least-privilege token routing: `X-Full-Access-Token` is only sent to the
   endpoints that require it (/doc*, /habits?raw=1, GET /reminders,
-  /reminder/deleteAll, /resetRewardPoints); everything else uses the
-  limited `X-API-Token`.
+  /resetRewardPoints); everything else uses the limited `X-API-Token`.
 - Every call goes through the global rate limiter.
 - Never logs headers, tokens, or request bodies.
 """
@@ -23,13 +22,14 @@ from .ratelimit import RateLimiter
 logger = logging.getLogger(__name__)
 
 # Endpoints that require the Full Access Token per the official docs.
+# /reminder/deleteAll is deliberately not covered: no tool exposes it
+# (too blunt — it wipes every reminder in one call).
 FULL_ACCESS_ENDPOINTS = {
     "/doc",
     "/doc/update",
     "/doc/create",
     "/doc/delete",
     "/reminders",
-    "/reminder/deleteAll",
     "/resetRewardPoints",
 }
 
