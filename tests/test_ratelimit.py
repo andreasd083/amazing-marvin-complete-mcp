@@ -55,6 +55,18 @@ async def test_stale_state_from_other_day_ignored(tmp_path):
     assert limiter.calls_today == 0
 
 
+async def test_calls_today_is_readonly_across_rollover(monkeypatch):
+    """calls_today must not mutate shared state (that would race with
+    acquire, which mutates under the lock) - it reports 0 after a day
+    rollover and leaves the actual reset to the next acquire."""
+    limiter = RateLimiter()
+    await limiter.acquire(is_write=True)
+    assert limiter.calls_today == 1
+    limiter._count_date = "2000-01-01"  # simulate: last acquire was another day
+    assert limiter.calls_today == 0
+    assert limiter._count == 1  # unchanged - no mutation outside the lock
+
+
 async def test_concurrent_acquires_serialized(monkeypatch):
     monkeypatch.setattr(ratelimit, "READ_INTERVAL_S", 0.05)
     limiter = RateLimiter()

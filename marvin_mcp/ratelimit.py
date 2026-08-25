@@ -83,7 +83,11 @@ class RateLimiter:
 
     @property
     def calls_today(self) -> int:
-        self._roll_day()
+        # Read-only on purpose: mutating via _roll_day() here would race
+        # with acquire() (which mutates under self._lock). If the day has
+        # rolled over since the last acquire, today's count is simply 0.
+        if self._today() != self._count_date:
+            return 0
         return self._count
 
     async def acquire(self, *, is_write: bool) -> None:
