@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
@@ -378,8 +379,6 @@ async def create_category_or_project(
         # Own _id: /doc/create does not echo back the server-generated id
         # (verified against the live API 2026-08-19), so we set it ourselves
         # in order to be able to return it.
-        import uuid
-
         doc: dict[str, Any] = {
             "_id": uuid.uuid4().hex,
             "db": "Categories",
@@ -743,8 +742,6 @@ async def set_reminder(
     get_reminders). Task-linked reminders are set in the Marvin app; use
     this tool for standalone reminders only."""
     try:
-        import uuid
-
         reminder = {
             "time": time_unix_seconds,
             "offset": 0,
