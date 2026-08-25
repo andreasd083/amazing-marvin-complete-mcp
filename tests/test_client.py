@@ -71,6 +71,15 @@ async def test_add_task_disables_autocomplete(settings, transport):
     assert transport.requests[-1].headers.get("X-Auto-Complete") == "false"
 
 
+async def test_add_project_blocks_hash_in_client_layer(settings, transport):
+    # The '#word' guard lives in the client so every caller is covered
+    # (/addProject ignores X-Auto-Complete, live-tested 2026-08-20)
+    client = make_client(transport, settings)
+    with pytest.raises(MarvinError, match="X-Auto-Complete"):
+        await client.add_project({"title": "Campaign #2026", "parentId": "cat1"})
+    assert transport.requests == []  # no API call spent
+
+
 async def test_error_response_raises_without_leaking_headers(settings, transport):
     import httpx
 

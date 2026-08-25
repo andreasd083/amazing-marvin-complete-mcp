@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
@@ -141,6 +142,18 @@ class MarvinClient:
         )
 
     async def add_project(self, data: dict) -> dict:
+        # /addProject has the same '#word' corruption bug as /addTask
+        # (the string is stored unresolved as parentId, the project becomes
+        # invisible) but ignores the X-Auto-Complete header (live-tested
+        # 2026-08-20). The guard lives here so every caller is covered;
+        # raising before the limiter runs means no API call is spent.
+        if re.search(r"#\S", data.get("title", "")):
+            raise MarvinError(
+                "Project titles containing '#word' are blocked: /addProject "
+                "stores the string unresolved as parentId (making the "
+                "project invisible) and ignores the X-Auto-Complete header. "
+                "Rephrase the title without '#'."
+            )
         return await self.request("POST", "/addProject", json=data)
 
     async def add_event(self, data: dict) -> dict:
