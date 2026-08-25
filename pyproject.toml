@@ -5,10 +5,24 @@ description = "MCP server for Amazing Marvin with complete public-API coverage (
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
+authors = [{ name = "andreasd083" }]
+keywords = ["mcp", "model-context-protocol", "amazing-marvin", "marvin", "productivity", "task-management"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Scheduling",
+]
 dependencies = [
     "fastmcp>=2.10,<3",
     "httpx>=0.27",
 ]
+
+[project.urls]
+Repository = "https://github.com/andreasd083/amazing-marvin-complete-mcp"
+Issues = "https://github.com/andreasd083/amazing-marvin-complete-mcp/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -21,6 +35,9 @@ http = [
 
 [project.scripts]
 marvin-mcp = "marvin_mcp.__main__:main"
+# Alias matching the PyPI package name, so `uvx amazing-marvin-complete-mcp`
+# works without --from.
+amazing-marvin-complete-mcp = "marvin_mcp.__main__:main"
 
 [build-system]
 requires = ["setuptools>=68"]

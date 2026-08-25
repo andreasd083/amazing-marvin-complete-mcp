@@ -1,5 +1,7 @@
 # amazing-marvin-complete-mcp
 
+<!-- mcp-name: io.github.andreasd083/amazing-marvin-complete-mcp -->
+
 An MCP ([Model Context Protocol](https://modelcontextprotocol.io)) server for
 [Amazing Marvin](https://amazingmarvin.com) with **complete coverage of the
 public API**: 34 tools over all ~31 documented endpoints, a global rate
@@ -59,9 +61,16 @@ Treat them like passwords; see [SECURITY.md](SECURITY.md).
 
 Requires Python 3.12+.
 
+**From PyPI** (recommended): with [uv](https://docs.astral.sh/uv/) installed
+there is nothing to set up — point your MCP client at
+`uvx amazing-marvin-complete-mcp` as shown below.
+
+**From source:**
+
 ```bash
 git clone <this repo> && cd amazing-marvin-complete-mcp
 python -m venv .venv && .venv/bin/pip install .
+# then use /path/to/.venv/bin/marvin-mcp as the command below
 ```
 
 ### Local (stdio) — Claude Desktop, Claude Code, any MCP client
@@ -72,7 +81,8 @@ The default transport is stdio, so the client starts the server itself:
 {
   "mcpServers": {
     "amazing-marvin": {
-      "command": "/path/to/.venv/bin/marvin-mcp",
+      "command": "uvx",
+      "args": ["amazing-marvin-complete-mcp"],
       "env": {
         "MARVIN_API_TOKEN": "…",
         "MARVIN_FULL_ACCESS_TOKEN": "…",
@@ -84,7 +94,7 @@ The default transport is stdio, so the client starts the server itself:
 ```
 
 (For Claude Code: `claude mcp add amazing-marvin -e MARVIN_API_TOKEN=… --
-/path/to/.venv/bin/marvin-mcp`.)
+uvx amazing-marvin-complete-mcp`.)
 
 ### Remote (Streamable HTTP)
 

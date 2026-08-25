@@ -1,0 +1,43 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.andreasd083/amazing-marvin-complete-mcp",
+  "title": "Amazing Marvin (complete)",
+  "description": "Amazing Marvin task manager: complete public-API coverage (34 tools) with built-in rate limiting",
+  "repository": {
+    "url": "https://github.com/andreasd083/amazing-marvin-complete-mcp",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "amazing-marvin-complete-mcp",
+      "version": "1.0.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "MARVIN_API_TOKEN",
+          "description": "Amazing Marvin API token (Settings -> API). Enough for reading and creating tasks.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "MARVIN_FULL_ACCESS_TOKEN",
+          "description": "Amazing Marvin Full Access token (optional but recommended - required by update/delete tools, category creation, time blocks, habit listing, reminders).",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "MARVIN_TIMEZONE",
+          "description": "IANA timezone matching your Marvin account (e.g. Europe/Stockholm). Defaults to the system timezone.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
