@@ -81,3 +81,24 @@ async def test_midnight_rollover_resets_budget_mid_queue(monkeypatch):
     await limiter.acquire(is_write=True)  # now allowed again
     assert limiter._count == 1
     assert limiter._count_date == "2026-08-26"
+
+
+async def test_starts_and_errors_cleanly_without_api_token(tmp_path, transport):
+    """The server must start (and list tools) without MARVIN_API_TOKEN so
+    directory introspection works — tool calls return a clear error instead
+    of crashing at startup (added 1.2.1 for Glama's sandboxed build)."""
+    from marvin_mcp import server
+    from marvin_mcp.config import Settings
+
+    server.init(
+        Settings(
+            api_token=None,
+            full_access_token=None,
+            mcp_auth_token=None,
+            state_dir=tmp_path,
+        ),
+        transport=transport,
+    )
+    result = await server.get_today_items.fn()
+    assert "MARVIN_API_TOKEN" in result["error"]
+    assert transport.requests == []  # no API call attempted

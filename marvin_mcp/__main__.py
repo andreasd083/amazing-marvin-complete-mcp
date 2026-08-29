@@ -76,6 +76,12 @@ def check_http_auth(settings) -> None:
 
 def main() -> None:
     settings = load_settings()
+    if not settings.api_token:
+        logging.warning(
+            "MARVIN_API_TOKEN is not configured - the server starts and lists "
+            "its tools, but every tool call will fail until MARVIN_API_TOKEN "
+            "(or MARVIN_API_TOKEN_FILE) is set and the server restarted."
+        )
     server.init(settings)
     if settings.transport == "stdio":
         server.mcp.run()  # FastMCP's stdio transport

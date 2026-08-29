@@ -52,8 +52,10 @@ respect they deserve.
 Both tokens live in Amazing Marvin under **Settings → API**
 ([app.amazingmarvin.com/pre?api](https://app.amazingmarvin.com/pre?api)):
 
-- **API Token** (`MARVIN_API_TOKEN`, required) — limited access; enough for
-  reading and creating tasks.
+- **API Token** (`MARVIN_API_TOKEN`, required for use) — limited access;
+  enough for reading and creating tasks. The server does start without it
+  (so MCP clients and directories can list the tools), but every tool call
+  returns a clear error until the token is set.
 - **Full Access Token** (`MARVIN_FULL_ACCESS_TOKEN`, optional but
   recommended) — required by all `/doc*`-based tools: `update_task`,
   `set_priority`, `unmark_done`, `delete_task`, category creation, time

@@ -77,6 +77,12 @@ class MarvinClient:
                     "which is not configured."
                 )
             return {"X-Full-Access-Token": self._settings.full_access_token}
+        if not self._settings.api_token:
+            raise MarvinError(
+                "MARVIN_API_TOKEN is not configured. Set MARVIN_API_TOKEN (or "
+                "MARVIN_API_TOKEN_FILE) in the server's environment and restart "
+                "— the token lives in Amazing Marvin under Settings -> API."
+            )
         return {"X-API-Token": self._settings.api_token}
 
     async def request(

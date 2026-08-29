@@ -51,7 +51,7 @@ def _read_secret(name: str, required: bool = True) -> str | None:
 
 @dataclass
 class Settings:
-    api_token: str = field(repr=False)
+    api_token: str | None = field(repr=False)
     full_access_token: str | None = field(repr=False)
     mcp_auth_token: str | None = field(repr=False)
     transport: str = "stdio"
@@ -65,7 +65,7 @@ class Settings:
         return (
             f"Settings(transport={self.transport!r}, host={self.host!r}, "
             f"port={self.port}, state_dir={self.state_dir!r}, "
-            f"api_token=[HIDDEN], "
+            f"api_token={'[HIDDEN]' if self.api_token else None}, "
             f"full_access_token={'[HIDDEN]' if self.full_access_token else None}, "
             f"mcp_auth_token={'[HIDDEN]' if self.mcp_auth_token else None})"
         )
@@ -73,7 +73,7 @@ class Settings:
 
 def load_settings() -> Settings:
     return Settings(
-        api_token=_read_secret("MARVIN_API_TOKEN"),
+        api_token=_read_secret("MARVIN_API_TOKEN", required=False),
         full_access_token=_read_secret("MARVIN_FULL_ACCESS_TOKEN", required=False),
         mcp_auth_token=_read_secret("MCP_AUTH_TOKEN", required=False),
         transport=os.environ.get("MCP_TRANSPORT", "stdio").lower(),
