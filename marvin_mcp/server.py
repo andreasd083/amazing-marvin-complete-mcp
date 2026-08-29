@@ -1,12 +1,16 @@
 """MCP server for Amazing Marvin with complete public-API coverage.
 
-34 tools covering all ~31 documented public endpoints: core CRUD + priority,
+36 tools covering all ~31 documented public endpoints: core CRUD + priority,
 habits, time blocks (read + experimental create), time tracking, labels,
 goals, reminders, and kudos/reward points. Deliberately no Smart List /
 task-picking logic — Marvin's own Spotlight does the picking.
 
+As of 1.1.0, every writable field in Marvin's official data model (Tasks and
+Categories/Projects) is either supported by a tool or explicitly documented
+as unsupported; see docs/field-reconciliation.md.
+
 Many tool descriptions carry warnings and behavioral notes verified against
-the live API (2026-08-19); see the "Marvin API quirks & findings" section
+the live API (2026-08-19/29); see the "Marvin API quirks & findings" section
 of the README for the full list.
 """
 
@@ -15,6 +19,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
@@ -60,6 +65,27 @@ def make_setters(fields: dict[str, Any]) -> list[dict]:
         setters.append({"key": f"fieldUpdates.{key}", "val": ts})
     setters.append({"key": "updatedAt", "val": ts})
     return setters
+
+
+def check_planned_week(value: str) -> None:
+    """plannedWeek must be the Monday of the ISO week (per the data-type
+    docs); any other date yields a week entry Marvin does not display
+    correctly."""
+    try:
+        day = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise MarvinError("planned_week must have the format YYYY-MM-DD (the week's Monday).") from None
+    if day.weekday() != 0:
+        raise MarvinError(
+            f"planned_week must be the week's Monday (YYYY-MM-DD); {value} is not a Monday."
+        )
+
+
+def check_planned_month(value: str) -> None:
+    try:
+        datetime.strptime(value, "%Y-%m")
+    except ValueError:
+        raise MarvinError("planned_month must have the format YYYY-MM.") from None
 
 
 def tool_error(exc: Exception) -> dict:
@@ -131,6 +157,39 @@ async def create_task(
     time_estimate_minutes: Annotated[
         int | None, Field(description="Time estimate in minutes", ge=1)
     ] = None,
+    planned_week: Annotated[
+        str | None,
+        Field(description="Plan into a week: the week's Monday YYYY-MM-DD (Planning Ahead strategy)"),
+    ] = None,
+    planned_month: Annotated[
+        str | None, Field(description="Plan into a month: YYYY-MM (Planning Ahead strategy)")
+    ] = None,
+    review_date: Annotated[
+        str | None, Field(description="Review date YYYY-MM-DD (Review Date strategy)")
+    ] = None,
+    backburner: Annotated[
+        bool | None, Field(description="True = put in the backburner (dormant, Backburner strategy)")
+    ] = None,
+    is_reward: Annotated[
+        bool | None, Field(description="True = reward task (Rewards strategy)")
+    ] = None,
+    reward_points: Annotated[
+        float | None, Field(description="Reward points the task awards on completion", ge=0)
+    ] = None,
+    daily_section: Annotated[
+        str | None,
+        Field(description="Day section: 'Morning', 'Afternoon' or 'Evening' (dailyStructure strategy)"),
+    ] = None,
+    bonus_section: Annotated[
+        str | None, Field(description="'Essential' or 'Bonus' (bonusStructure strategy)")
+    ] = None,
+    custom_section: Annotated[
+        str | None,
+        Field(description="ID of a custom section from strategySettings.customStructure (customStructure strategy)"),
+    ] = None,
+    time_block_section: Annotated[
+        str | None, Field(description="Time block ID (from get_today_time_blocks) to place the task in")
+    ] = None,
 ) -> dict:
     """Create a task in Amazing Marvin. Prefer priority/frog over dates
     where possible.
@@ -142,7 +201,14 @@ async def create_task(
     therefore safe. Without this, every '#word' would corrupt the task (the
     string is stored unresolved as parentId, making the task invisible).
     Use the parameters instead: parent_id, day, priority,
-    time_estimate_minutes, label_ids."""
+    time_estimate_minutes, label_ids.
+
+    Note: startDate/endDate CANNOT be set here — /addTask ignores them
+    (verified against the live API 2026-08-29). Set them with update_task
+    after creation. Strategy-dependent fields (planned_week/month,
+    review_date, backburner, is_reward/reward_points, the sections) are
+    stored even when the strategy is disabled in the app — they just are
+    not shown in the UI then."""
     try:
         data: dict[str, Any] = {"title": title, "done": False}
         if parent_id:
@@ -161,6 +227,28 @@ async def create_task(
             data["dueDate"] = due_date
         if time_estimate_minutes is not None:
             data["timeEstimate"] = time_estimate_minutes * 60_000
+        if planned_week:
+            check_planned_week(planned_week)
+            data["plannedWeek"] = planned_week
+        if planned_month:
+            check_planned_month(planned_month)
+            data["plannedMonth"] = planned_month
+        if review_date:
+            data["reviewDate"] = review_date
+        if backburner is not None:
+            data["backburner"] = backburner
+        if is_reward is not None:
+            data["isReward"] = is_reward
+        if reward_points is not None:
+            data["rewardPoints"] = reward_points
+        if daily_section:
+            data["dailySection"] = daily_section
+        if bonus_section:
+            data["bonusSection"] = bonus_section
+        if custom_section:
+            data["customSection"] = custom_section
+        if time_block_section:
+            data["timeBlockSection"] = time_block_section
         created = await get_client().add_task(data)
         return {"created": created}
     except Exception as e:
@@ -177,7 +265,10 @@ async def mark_done(
     Marvin app (done=true via /doc/update would technically work but skips
     the app's side effects). Safe for generated instances of recurring tasks
     too (verified live): the instance ID is deterministic
-    ('YYYY-MM-DD_<recurringTaskId>'), so no duplicates can occur."""
+    ('YYYY-MM-DD_<recurringTaskId>'), so no duplicates can occur.
+    A permanent 500 = the task does not exist (deleted; the server responds
+    500 instead of 404 for missing IDs, verified live 2026-08-29) — fetch a
+    fresh ID."""
     try:
         return {"completed": await get_client().mark_done(item_id)}
     except Exception as e:
@@ -192,7 +283,9 @@ async def unmark_done(
     Requires the Full Access Token. Safe for generated instances of recurring
     tasks too (verified live). Note: any kudos from the completion are not
     adjusted; awarded reward points can however be undone with
-    unclaim_reward_points."""
+    unclaim_reward_points. A permanent 500 = the document does not exist
+    (deleted or wrong ID; the server responds 500 instead of 404, verified
+    live 2026-08-29)."""
     try:
         result = await get_client().update_doc(
             item_id, make_setters({"done": False, "doneAt": None})
@@ -204,7 +297,7 @@ async def unmark_done(
 
 @mcp.tool(annotations=IDEMPOTENT_WRITE)
 async def update_task(
-    item_id: Annotated[str, Field(description="ID of the task/project")],
+    item_id: Annotated[str, Field(description="Task ID")],
     title: Annotated[str | None, Field(description="New title")] = None,
     parent_id: Annotated[str | None, Field(description="Move to category/project ID")] = None,
     day: Annotated[
@@ -217,15 +310,80 @@ async def update_task(
         list[str] | None,
         Field(description="New labels (IDs from get_labels; replaces existing ones, [] removes all)"),
     ] = None,
+    time_estimate_minutes: Annotated[
+        int | None, Field(description="Time estimate in minutes, 0 removes it", ge=0)
+    ] = None,
+    start_date: Annotated[
+        str | None,
+        Field(description="Start date YYYY-MM-DD (the task is hidden/backburnered before it), '' removes"),
+    ] = None,
+    end_date: Annotated[
+        str | None, Field(description="Soft deadline YYYY-MM-DD (Start & End Dates strategy), '' removes")
+    ] = None,
+    planned_week: Annotated[
+        str | None,
+        Field(description="Plan into a week: the week's Monday YYYY-MM-DD (Planning Ahead strategy), '' removes"),
+    ] = None,
+    planned_month: Annotated[
+        str | None, Field(description="Plan into a month: YYYY-MM (Planning Ahead strategy), '' removes")
+    ] = None,
+    review_date: Annotated[
+        str | None, Field(description="Review date YYYY-MM-DD (Review Date strategy), '' removes")
+    ] = None,
+    backburner: Annotated[
+        bool | None, Field(description="True = put in the backburner (dormant), False = take out")
+    ] = None,
+    reward_points: Annotated[
+        float | None, Field(description="Reward points the task awards on completion, 0 removes", ge=0)
+    ] = None,
+    daily_section: Annotated[
+        str | None,
+        Field(description="Day section 'Morning'/'Afternoon'/'Evening' (dailyStructure strategy), '' removes"),
+    ] = None,
+    bonus_section: Annotated[
+        str | None, Field(description="'Essential' or 'Bonus' (bonusStructure strategy), '' removes")
+    ] = None,
+    custom_section: Annotated[
+        str | None,
+        Field(description="ID of a custom section from strategySettings.customStructure, '' removes"),
+    ] = None,
+    time_block_section: Annotated[
+        str | None,
+        Field(description="Time block ID (from get_today_time_blocks) to place the task in, '' removes"),
+    ] = None,
+    snooze_until_unix_ms: Annotated[
+        int | None,
+        Field(description="Snooze the task until unix time in milliseconds (itemSnoozeTime; hidden everywhere except the master list), 0 removes", ge=0),
+    ] = None,
+    perma_snooze_time: Annotated[
+        str | None,
+        Field(description="Hide the task every day until HH:mm (permaSnoozeTime), '' removes"),
+    ] = None,
+    orbit: Annotated[
+        bool | None,
+        Field(description="Orbit strategy: True = put in orbit. UNDOCUMENTED field (missing from the official data types; bool type verified in live data 2026-08-29) — consider reading the current value first"),
+    ] = None,
+    no_auto_orbit: Annotated[
+        bool | None,
+        Field(description="Orbit strategy: True = exempt the task from automatic orbiting. UNDOCUMENTED field (bool type verified in live data 2026-08-29)"),
+    ] = None,
 ) -> dict:
-    """Update fields on an existing task via /doc/update (Full Access Token).
-    For priority, use set_priority. Always complete tasks via mark_done,
-    never here. Note on recurring tasks: never edit recurrence rules here —
-    neither on a generated instance (recurring=true, _id 'YYYY-MM-DD_<id>')
-    nor on the generator document. Do that editing in the Marvin app. Simple
-    field changes (title, note) on a single instance are fine.
+    """Update fields on an existing TASK via /doc/update (Full Access Token).
+    For categories/projects, use update_category_or_project. For priority,
+    use set_priority. Always complete tasks via mark_done, never here.
+    Strategy-dependent fields (start/end date, planned_week/month,
+    review_date, backburner, orbit, the sections) can be set even when the
+    strategy is disabled in the app — they just are not shown in the UI then.
+    Note on recurring tasks: never edit recurrence rules here — neither on a
+    generated instance (recurring=true, _id 'YYYY-MM-DD_<id>') nor on the
+    generator document. Do that editing in the Marvin app. Simple field
+    changes (title, note) on a single instance are fine.
     Note: Marvin's server can sporadically respond 500 on /doc/update
-    (transient and atomic — no partial write); just retry."""
+    (transient and atomic — no partial write); just retry. But a PERMANENT
+    500 (persists across retries) means the document does not exist —
+    deleted, or a wrong/never-existing ID (the server responds 500 instead
+    of 404 for missing IDs, verified live 2026-08-29). Fetch a fresh ID via
+    get_categories/get_children."""
     try:
         fields: dict[str, Any] = {}
         if title is not None:
@@ -240,6 +398,42 @@ async def update_task(
             fields["dueDate"] = due_date or None
         if label_ids is not None:
             fields["labelIds"] = label_ids
+        if time_estimate_minutes is not None:
+            fields["timeEstimate"] = time_estimate_minutes * 60_000 or None
+        if start_date is not None:
+            fields["startDate"] = start_date or None
+        if end_date is not None:
+            fields["endDate"] = end_date or None
+        if planned_week is not None:
+            if planned_week:
+                check_planned_week(planned_week)
+            fields["plannedWeek"] = planned_week or None
+        if planned_month is not None:
+            if planned_month:
+                check_planned_month(planned_month)
+            fields["plannedMonth"] = planned_month or None
+        if review_date is not None:
+            fields["reviewDate"] = review_date or None
+        if backburner is not None:
+            fields["backburner"] = backburner
+        if reward_points is not None:
+            fields["rewardPoints"] = reward_points or None
+        if daily_section is not None:
+            fields["dailySection"] = daily_section or None
+        if bonus_section is not None:
+            fields["bonusSection"] = bonus_section or None
+        if custom_section is not None:
+            fields["customSection"] = custom_section or None
+        if time_block_section is not None:
+            fields["timeBlockSection"] = time_block_section or None
+        if snooze_until_unix_ms is not None:
+            fields["itemSnoozeTime"] = snooze_until_unix_ms or None
+        if perma_snooze_time is not None:
+            fields["permaSnoozeTime"] = perma_snooze_time or None
+        if orbit is not None:
+            fields["orbit"] = orbit
+        if no_auto_orbit is not None:
+            fields["noAutoOrbit"] = no_auto_orbit
         if not fields:
             return {"error": "No fields to update were given."}
         result = await get_client().update_doc(item_id, make_setters(fields))
@@ -261,7 +455,12 @@ async def set_priority(
     ] = None,
 ) -> dict:
     """Set or change priority (isStarred) and/or the frog marker on an
-    existing task. Requires the Full Access Token."""
+    existing TASK. Requires the Full Access Token. Does not apply to
+    projects: they use the string field priority ('high'/'mid'/'low'), not
+    isStarred (verified live 2026-08-29) — set it via
+    update_category_or_project. A permanent 500 = the task does not exist
+    (deleted or wrong ID) — the server responds 500 instead of 404
+    (verified live 2026-08-29); fetch a fresh ID."""
     try:
         fields: dict[str, Any] = {}
         if priority is not None:
@@ -360,9 +559,54 @@ async def create_category_or_project(
         str, Field(description="ID of the parent category, or 'root' for the top level")
     ] = "root",
     note: Annotated[str | None, Field(description="Note")] = None,
+    color: Annotated[
+        str | None,
+        Field(description="Color '#rrggbb'. Categories ONLY at creation — /addProject ignores the field (verified live 2026-08-29); set project color with update_category_or_project afterwards"),
+    ] = None,
+    icon: Annotated[
+        str | None,
+        Field(description="Icon name (as in the app's icon picker). Categories ONLY at creation — /addProject ignores the field; set it via update_category_or_project afterwards"),
+    ] = None,
+    time_estimate_minutes: Annotated[
+        int | None,
+        Field(description="Time estimate in minutes (shown added to the children's estimates)", ge=1),
+    ] = None,
+    planned_week: Annotated[
+        str | None,
+        Field(description="Plan into a week: the week's Monday YYYY-MM-DD (Planning Ahead strategy; mainly projects)"),
+    ] = None,
+    planned_month: Annotated[
+        str | None,
+        Field(description="Plan into a month: YYYY-MM (Planning Ahead strategy; mainly projects)"),
+    ] = None,
+    review_date: Annotated[
+        str | None, Field(description="Review date YYYY-MM-DD (Review Date strategy)")
+    ] = None,
+    day: Annotated[
+        str | None,
+        Field(description="Projects ONLY: schedule on YYYY-MM-DD or 'today' (categories cannot be scheduled)"),
+    ] = None,
+    due_date: Annotated[
+        str | None, Field(description="Projects ONLY: deadline YYYY-MM-DD (categories have no dueDate)")
+    ] = None,
+    priority: Annotated[
+        Literal["high", "mid", "low"] | None,
+        Field(description="Projects ONLY: priority as a string — projects do not use isStarred (verified live 2026-08-29)"),
+    ] = None,
+    frog: Annotated[
+        int | None,
+        Field(description="Projects ONLY: frog marker 1=normal, 2=baby, 3=monster", ge=1, le=3),
+    ] = None,
+    label_ids: Annotated[
+        list[str] | None, Field(description="Projects ONLY: label IDs (from get_labels)")
+    ] = None,
 ) -> dict:
     """Create a category (via /doc/create, Full Access Token) or a project
     (via /addProject). Categories can contain categories; projects cannot.
+    Categories have no day/dueDate/priority/frog/labels in the data model —
+    those parameters are rejected for kind='category'. startDate/endDate
+    cannot be set at creation (/addProject ignores them, verified live
+    2026-08-29) — use update_category_or_project afterwards.
 
     Note: project titles must not contain '#word' — /addProject has the same
     corruption bug as /addTask (the string is stored unresolved as parentId
@@ -371,10 +615,53 @@ async def create_category_or_project(
     it locally before any API call. Category titles are unaffected
     (/doc/create parses nothing)."""
     try:
+        if kind == "category":
+            rejected = {
+                "day": day, "due_date": due_date, "priority": priority,
+                "frog": frog, "label_ids": label_ids,
+            }
+            given = [name for name, val in rejected.items() if val is not None]
+            if given:
+                return {
+                    "error": (
+                        f"The parameters {', '.join(given)} apply to projects only — "
+                        "categories cannot be scheduled, prioritized or labeled "
+                        "according to Marvin's data model."
+                    )
+                }
         if kind == "project":
+            if color or icon:
+                return {
+                    "error": (
+                        "color/icon cannot be set when creating a project — "
+                        "/addProject ignores the fields (verified live 2026-08-29). "
+                        "Create the project first, then set them with "
+                        "update_category_or_project."
+                    )
+                }
             data: dict[str, Any] = {"title": title, "parentId": parent_id, "done": False}
             if note:
                 data["note"] = note
+            if time_estimate_minutes is not None:
+                data["timeEstimate"] = time_estimate_minutes * 60_000
+            if planned_week:
+                check_planned_week(planned_week)
+                data["plannedWeek"] = planned_week
+            if planned_month:
+                check_planned_month(planned_month)
+                data["plannedMonth"] = planned_month
+            if review_date:
+                data["reviewDate"] = review_date
+            if day:
+                data["day"] = local_today() if day == "today" else day
+            if due_date:
+                data["dueDate"] = due_date
+            if priority:
+                data["priority"] = priority
+            if frog is not None:
+                data["isFrogged"] = frog
+            if label_ids:
+                data["labelIds"] = label_ids
             return {"created": await get_client().add_project(data)}
         # Own _id: /doc/create does not echo back the server-generated id
         # (verified against the live API 2026-08-19), so we set it ourselves
@@ -389,7 +676,205 @@ async def create_category_or_project(
         }
         if note:
             doc["note"] = note
+        if color:
+            doc["color"] = color
+        if icon:
+            doc["icon"] = icon
+        if time_estimate_minutes is not None:
+            doc["timeEstimate"] = time_estimate_minutes * 60_000
+        if planned_week:
+            check_planned_week(planned_week)
+            doc["plannedWeek"] = planned_week
+        if planned_month:
+            check_planned_month(planned_month)
+            doc["plannedMonth"] = planned_month
+        if review_date:
+            doc["reviewDate"] = review_date
         return {"created": await get_client().create_doc(doc)}
+    except Exception as e:
+        return tool_error(e)
+
+
+@mcp.tool(annotations=IDEMPOTENT_WRITE)
+async def update_category_or_project(
+    item_id: Annotated[str, Field(description="ID of the category/project (from get_categories)")],
+    title: Annotated[str | None, Field(description="New title")] = None,
+    parent_id: Annotated[
+        str | None, Field(description="Move to parent category ID, or 'root'")
+    ] = None,
+    note: Annotated[str | None, Field(description="New note (replaces the existing one)")] = None,
+    color: Annotated[str | None, Field(description="Color '#rrggbb', '' removes")] = None,
+    icon: Annotated[
+        str | None, Field(description="Icon name (as in the app's icon picker), '' removes")
+    ] = None,
+    time_estimate_minutes: Annotated[
+        int | None, Field(description="Time estimate in minutes, 0 removes it", ge=0)
+    ] = None,
+    start_date: Annotated[
+        str | None, Field(description="Start date YYYY-MM-DD (Start & End Dates strategy), '' removes")
+    ] = None,
+    end_date: Annotated[
+        str | None, Field(description="Soft deadline YYYY-MM-DD (Start & End Dates strategy), '' removes")
+    ] = None,
+    planned_week: Annotated[
+        str | None,
+        Field(description="Plan into a week: the week's Monday YYYY-MM-DD (Planning Ahead strategy), '' removes"),
+    ] = None,
+    planned_month: Annotated[
+        str | None, Field(description="Plan into a month: YYYY-MM (Planning Ahead strategy), '' removes")
+    ] = None,
+    review_date: Annotated[
+        str | None, Field(description="Review date YYYY-MM-DD (Review Date strategy), '' removes")
+    ] = None,
+    day: Annotated[
+        str | None,
+        Field(description="Projects ONLY: schedule YYYY-MM-DD, 'today', or 'unassigned' to unschedule"),
+    ] = None,
+    due_date: Annotated[
+        str | None, Field(description="Projects ONLY: deadline YYYY-MM-DD, '' removes")
+    ] = None,
+    priority: Annotated[
+        Literal["high", "mid", "low", ""] | None,
+        Field(description="Projects ONLY: priority 'high'/'mid'/'low', '' removes. Projects use the string field priority, not isStarred (verified live 2026-08-29)"),
+    ] = None,
+    frog: Annotated[
+        int | None,
+        Field(description="Projects ONLY: frog 3=monster, 2=baby, 1=normal, 0=remove", ge=0, le=3),
+    ] = None,
+    label_ids: Annotated[
+        list[str] | None,
+        Field(description="Projects ONLY: new labels (replaces existing ones, [] removes all)"),
+    ] = None,
+    backburner: Annotated[
+        bool | None, Field(description="True = put in the backburner (dormant), False = take out")
+    ] = None,
+    orbit: Annotated[
+        bool | None,
+        Field(description="Orbit strategy: True = put in orbit. UNDOCUMENTED field (bool type verified in live data 2026-08-29) — consider reading the current value first"),
+    ] = None,
+    no_auto_orbit: Annotated[
+        bool | None,
+        Field(description="Orbit strategy: True = exempt from automatic orbiting. UNDOCUMENTED field (bool type verified in live data 2026-08-29)"),
+    ] = None,
+) -> dict:
+    """Update fields on an existing CATEGORY or PROJECT via /doc/update
+    (Full Access Token). For tasks, use update_task. Fields marked
+    'Projects ONLY' do not exist in the category data model — the tool does
+    not block the write (the document type is unknown here), so do not set
+    them on categories. Strategy-dependent fields (start/end date,
+    planned_week/month, review_date, backburner, orbit) can be set even when
+    the strategy is disabled in the app. Do not complete projects here
+    (done via /doc/update skips the app's side effects) — that is done in
+    the Marvin app.
+    Note: Marvin's server can sporadically respond 500 on /doc/update
+    (transient and atomic); just retry. But a PERMANENT 500 (persists across
+    retries) means the document does not exist — deleted, or a
+    wrong/never-existing ID (the server responds 500 instead of 404 for
+    missing IDs, verified live 2026-08-29). Fetch a fresh ID via
+    get_categories/get_children."""
+    try:
+        fields: dict[str, Any] = {}
+        if title is not None:
+            fields["title"] = title
+        if parent_id is not None:
+            fields["parentId"] = parent_id
+        if note is not None:
+            fields["note"] = note
+        if color is not None:
+            fields["color"] = color or None
+        if icon is not None:
+            fields["icon"] = icon or None
+        if time_estimate_minutes is not None:
+            fields["timeEstimate"] = time_estimate_minutes * 60_000 or None
+        if start_date is not None:
+            fields["startDate"] = start_date or None
+        if end_date is not None:
+            fields["endDate"] = end_date or None
+        if planned_week is not None:
+            if planned_week:
+                check_planned_week(planned_week)
+            fields["plannedWeek"] = planned_week or None
+        if planned_month is not None:
+            if planned_month:
+                check_planned_month(planned_month)
+            fields["plannedMonth"] = planned_month or None
+        if review_date is not None:
+            fields["reviewDate"] = review_date or None
+        if day is not None:
+            fields["day"] = local_today() if day == "today" else day
+        if due_date is not None:
+            fields["dueDate"] = due_date or None
+        if priority is not None:
+            fields["priority"] = priority or None
+        if frog is not None:
+            fields["isFrogged"] = frog or False
+        if label_ids is not None:
+            fields["labelIds"] = label_ids
+        if backburner is not None:
+            fields["backburner"] = backburner
+        if orbit is not None:
+            fields["orbit"] = orbit
+        if no_auto_orbit is not None:
+            fields["noAutoOrbit"] = no_auto_orbit
+        if not fields:
+            return {"error": "No fields to update were given."}
+        result = await get_client().update_doc(item_id, make_setters(fields))
+        return {"updated": result}
+    except Exception as e:
+        return tool_error(e)
+
+
+@mcp.tool(annotations=IDEMPOTENT_WRITE)
+async def convert_category_or_project(
+    item_id: Annotated[
+        str, Field(description="ID of the project/category to convert (from get_categories)")
+    ],
+    to: Annotated[
+        Literal["category", "project"], Field(description="Target type to convert to")
+    ],
+) -> dict:
+    """EXPERIMENTAL: Convert project→category or category→project IN PLACE
+    via /doc/update (Full Access Token; there is no official conversion
+    endpoint, and this relies on undocumented server behavior that Marvin
+    could change). Same _id, createdAt and children remain — conversion is a
+    pure type change (verified against the live API 2026-08-29: the server
+    accepts and persists the change in both directions, and the app renders
+    correctly after an API-set change).
+    When converting to a category, the project-only fields
+    day/dueDate/priority/isFrogged are cleared (same as the app's 'Turn into
+    Category') plus firstScheduled (a leftover the app's variant leaves
+    behind); the previous values are returned in removed_project_fields so
+    they can be restored with update_category_or_project after a possible
+    back-conversion.
+    Do NOT convert a category that contains subcategories into a project —
+    projects cannot contain categories (risk of orphans/cycles; check
+    get_children first)."""
+    try:
+        doc = await get_client().get_doc(item_id)
+        if not isinstance(doc, dict) or doc.get("db") != "Categories":
+            return {
+                "error": (
+                    "The document is neither a category nor a project "
+                    "(db='Categories' required) — check item_id."
+                )
+            }
+        current = doc.get("type") or "category"
+        if current == to:
+            return {"error": f"The document is already of type '{to}' — nothing to convert."}
+        fields: dict[str, Any] = {"type": to}
+        removed: dict[str, Any] | None = None
+        if to == "category":
+            removed = {
+                k: doc.get(k)
+                for k in ("day", "dueDate", "priority", "isFrogged", "firstScheduled")
+            }
+            for k in removed:
+                fields[k] = None
+        result = await get_client().update_doc(item_id, make_setters(fields))
+        out: dict[str, Any] = {"updated": result, "converted_to": to}
+        if removed is not None:
+            out["removed_project_fields"] = removed
+        return out
     except Exception as e:
         return tool_error(e)
 

@@ -4,11 +4,15 @@
 
 An MCP ([Model Context Protocol](https://modelcontextprotocol.io)) server for
 [Amazing Marvin](https://amazingmarvin.com) with **complete coverage of the
-public API**: 34 tools over all ~31 documented endpoints, a global rate
+public API**: 36 tools over all ~31 documented endpoints, a global rate
 limiter that respects Marvin's documented limits, least-privilege token
-routing, and MCP tool annotations. Every non-obvious behavior claim in the
-tool descriptions was verified against the live API — the findings are
-documented below in [Marvin API quirks & findings](#marvin-api-quirks--findings),
+routing, and MCP tool annotations. As of 1.1.0 every writable field in
+Marvin's official data model (Tasks and Categories/Projects) is either
+supported by a tool or explicitly documented as unsupported — see
+[docs/field-reconciliation.md](docs/field-reconciliation.md). Every
+non-obvious behavior claim in the tool descriptions was verified against
+the live API — the findings are documented below in
+[Marvin API quirks & findings](#marvin-api-quirks--findings),
 which may be useful even if you never run this server.
 
 > **Maintenance status:** Bug reports are welcome and appreciated — they
@@ -19,13 +23,13 @@ which may be useful even if you never run this server.
 > you through setup and troubleshooting far faster than I can. Provided
 > as-is, without guarantees — it's MIT, fork freely.
 
-## Tools (34)
+## Tools (36)
 
 | Group | Tools |
 |---|---|
 | Core | `test_connection`, `create_task`, `mark_done`, `unmark_done`, `update_task`, `set_priority`, `delete_task` |
 | Reading | `get_today_items`, `get_due_items`, `get_children`, `get_categories` |
-| Structure | `create_category_or_project` |
+| Structure | `create_category_or_project`, `update_category_or_project`, `convert_category_or_project` (experimental) |
 | Habits | `list_habits`, `get_habit`, `record_habit` |
 | Time blocks | `get_today_time_blocks`, `create_time_block` (experimental) |
 | Time tracking | `get_tracked_item`, `start_tracking`, `stop_tracking`, `get_time_tracks` |
@@ -132,8 +136,8 @@ timezone. `get_rate_limit_status` shows today's usage.
 
 ## Marvin API quirks & findings
 
-Everything below was verified against the live API on 2026-08-19. This is
-the half of the repo you can use without running it.
+Everything below was verified against the live API (2026-08-19 through
+2026-08-29). This is the half of the repo you can use without running it.
 
 **Habits**
 - Non-raw `GET /habits` does **not** read your habit documents. It reads a
@@ -190,6 +194,28 @@ the half of the repo you can use without running it.
 - `/doc/update` can sporadically return a transient 500; the write is
   atomic (no partial state) — just retry. Project renames, moves, label
   changes etc. all work through it.
+- `/doc/update` returns **500 instead of 404** for documents that do not
+  exist (deleted or never created; live-tested 2026-08-29) — a *permanent*
+  500 therefore means "wrong/dead ID", not a server error or a corrupted
+  document.
+- `startDate`/`endDate` are ignored by `/addTask` and `/addProject`
+  (live-tested 2026-08-29) — they can only be set afterwards via
+  `/doc/update` (the update tools). `/addProject` also ignores
+  `color`/`icon` (set them via `update_category_or_project`).
+- Projects are prioritized with the string field `priority`
+  (`"high"`/`"mid"`/`"low"`), not `isStarred` like tasks (live-tested
+  2026-08-29) — which is why `set_priority` is task-only.
+- `orbit`/`noAutoOrbit` are missing from the wiki's data types but present
+  in live data (bool, verified 2026-08-29) — exposed as explicitly
+  undocumented passthrough parameters on the update tools.
+- Project↔category conversion happens **in place**: `_id`, `createdAt` and
+  the children remain (verified 2026-08-29, both via an app field test and
+  via the API). The app's "Turn into Category" permanently clears
+  `day`/`dueDate`/`priority`/`isFrogged` and leaves `firstScheduled` behind
+  as a leftover; `convert_category_or_project` does the same via the API
+  but returns the removed values and cleans up the leftover. There is no
+  official conversion endpoint — the tool sets `type` directly, which is
+  undocumented server behavior and marked experimental.
 - `/doc/create` does not echo back a server-generated `_id` — supply your
   own if you need to reference the document afterwards.
 - Deletion via `/doc/delete` is permanent; Marvin's trash is client-side.
