@@ -67,7 +67,7 @@ Orbit view unless `noAutoOrbit` is set.
 | `isFrogged` | supported | `create_task` (`frog`), `set_priority` |
 | `done`/`doneAt` | supported | `mark_done` (via `/markDone` — never `/doc/update`, MarvinAPI issue #6), `unmark_done` |
 | `backburner` | supported | `create_task`, `update_task` — only effective on unscheduled tasks; day trumps the flag in the UI (verified in the app 2026-08-29) |
-| `isReward` | supported | `create_task` — the task IS a reward (bought with points); do not combine with rewardPoints. UI rendering unverified |
+| `isReward` | supported (discouraged) | `create_task` — documented Task field with no observed function: the app's purchasable rewards are separate `db="Rewards"` documents that the public API cannot reach (live-tested 2026-08-29: /rewards and variants 404, no rewards profile documents, app rewards are not Tasks); the flag produced no UI effect |
 | `rewardPoints` | supported | `create_task`, `update_task` — points the task AWARDS; coin + points in the list row with the Rewards strategy on (verified in the app 2026-08-29) |
 | `dailySection` | supported | `create_task`, `update_task` (dailyStructure strategy) |
 | `bonusSection` | supported | `create_task`, `update_task` (bonusStructure strategy) |

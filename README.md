@@ -235,6 +235,11 @@ Everything below was verified against the live API (2026-08-19 through
   `MANUAL` — it is an API-only facility. The only compensation is spending
   the same amount, which inflates the spent statistics.
 - `/spendRewardPoints` returns a 500 if the balance would go negative.
+- The app's purchasable rewards are separate `db="Rewards"` documents that
+  the public API **cannot reach at all** (live-tested 2026-08-29: `/rewards`
+  and every variant 404, no rewards profile documents, and `/doc` needs an
+  ID you can't discover). The Task field `isReward` is decoupled from the
+  app's reward flow and produced no UI effect when set via the API.
 
 **Reminders**
 - A *task* reminder in Marvin is two writes that only the app keeps in

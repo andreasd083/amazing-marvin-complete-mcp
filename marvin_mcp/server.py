@@ -173,7 +173,7 @@ async def create_task(
     ] = None,
     is_reward: Annotated[
         bool | None,
-        Field(description="True = the task IS a reward, bought with points (Rewards strategy). Do NOT set together with reward_points (opposite direction: awards points) — contradictory. UI rendering of the flag unverified"),
+        Field(description="Documented Task field with no observed function — normally do NOT use. The app's purchasable rewards are separate Rewards documents that the public API cannot reach at all (live-tested 2026-08-29: no endpoint exists, and app rewards are not Tasks); the flag on a Task produced no UI effect. Never combine with reward_points"),
     ] = None,
     reward_points: Annotated[
         float | None,
