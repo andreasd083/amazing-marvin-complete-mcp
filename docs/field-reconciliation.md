@@ -107,7 +107,7 @@ Orbit view unless `noAutoOrbit` is set.
 | `dueDate` | supported (projects only) | as `day` |
 | `priority` | supported (projects only) | the string field `"high"`/`"mid"`/`"low"` — not `isStarred`; renders as a red ring in lists / red star in the panel (verified in the app 2026-08-29) |
 | `isFrogged` | supported (projects only) | `create_category_or_project` (`frog`), `update_category_or_project` |
-| `labelIds` | supported (projects only) | `create_category_or_project`, `update_category_or_project` |
+| `labelIds` | supported (projects only) | `create_category_or_project`, `update_category_or_project` — categories: the field is not part of the data model and the tools block it; the app attaches labels to categories only through its own Kanban drag flow (observed 2026-08-29: an API-created category could not be given a label any other way) |
 | `backburner` | supported (update only) | `update_category_or_project` — same condition as Tasks (unscheduled item) |
 | `type` | supported | `convert_category_or_project` (experimental — in-place conversion; no official endpoint) |
 | `orbit`, `noAutoOrbit` | supported (update only) | `update_category_or_project` — undocumented, see Tasks |
