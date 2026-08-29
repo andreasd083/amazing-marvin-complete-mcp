@@ -417,6 +417,9 @@ async def test_create_project_rejects_color_icon(init_server, transport):
 
 
 async def test_update_category_or_project_setters(init_server, transport):
+    transport.responses["/doc"] = httpx.Response(200, json={
+        "_id": "p1", "db": "Categories", "type": "project",
+    })
     await server.update_category_or_project.fn(
         item_id="p1",
         color="#abcdef",
@@ -437,6 +440,9 @@ async def test_update_category_or_project_setters(init_server, transport):
 
 
 async def test_update_category_or_project_clears(init_server, transport):
+    transport.responses["/doc"] = httpx.Response(200, json={
+        "_id": "p1", "db": "Categories", "type": "project",
+    })
     await server.update_category_or_project.fn(
         item_id="p1", priority="", color="", frog=0, due_date=""
     )
@@ -451,6 +457,37 @@ async def test_update_category_or_project_requires_some_field(init_server, trans
     result = await server.update_category_or_project.fn(item_id="p1")
     assert "error" in result
     assert transport.requests == []
+
+
+async def test_update_category_or_project_guards_project_fields_on_category(init_server, transport):
+    """Verified in the app 2026-08-29: project fields on a category make it
+    unrepairable from the app's UI — the tool reads the document type first
+    and blocks the write."""
+    transport.responses["/doc"] = httpx.Response(200, json={
+        "_id": "c1", "db": "Categories", "type": "category",
+    })
+    result = await server.update_category_or_project.fn(item_id="c1", due_date="2026-09-20")
+    assert "error" in result and "category" in result["error"]
+    assert transport.requests[-1].method == "GET"  # only the read, no update
+
+
+async def test_update_category_or_project_skips_type_check_without_project_fields(init_server, transport):
+    """Shared fields must not cost an extra GET."""
+    await server.update_category_or_project.fn(item_id="c1", color="#123456")
+    assert len(transport.requests) == 1
+    assert transport.requests[0].url.path.endswith("/doc/update")
+
+
+async def test_update_category_or_project_first_scheduled_restore(init_server, transport):
+    """firstScheduled can be written back after a conversion round trip
+    (nothing backfills it — verified 2026-08-29)."""
+    await server.update_category_or_project.fn(item_id="p1", first_scheduled="2026-09-02")
+    setters = {s["key"]: s["val"] for s in transport.last_json()["setters"]}
+    assert setters["firstScheduled"] == "2026-09-02"
+
+    await server.update_category_or_project.fn(item_id="p1", first_scheduled="")
+    setters = {s["key"]: s["val"] for s in transport.last_json()["setters"]}
+    assert setters["firstScheduled"] is None
 
 
 def test_update_category_or_project_annotations():

@@ -168,13 +168,16 @@ async def create_task(
         str | None, Field(description="Review date YYYY-MM-DD (Review Date strategy)")
     ] = None,
     backburner: Annotated[
-        bool | None, Field(description="True = put in the backburner (dormant, Backburner strategy)")
+        bool | None,
+        Field(description="True = put in the backburner (dormant). NOTE: only effective on an UNSCHEDULED task — scheduling (day) trumps the flag in the UI (verified in the app 2026-08-29), so do not combine with day"),
     ] = None,
     is_reward: Annotated[
-        bool | None, Field(description="True = reward task (Rewards strategy)")
+        bool | None,
+        Field(description="True = the task IS a reward, bought with points (Rewards strategy). Do NOT set together with reward_points (opposite direction: awards points) — contradictory. UI rendering of the flag unverified"),
     ] = None,
     reward_points: Annotated[
-        float | None, Field(description="Reward points the task awards on completion", ge=0)
+        float | None,
+        Field(description="Reward points the task AWARDS on completion (coin + points in the list row when the Rewards strategy is on, verified in the app 2026-08-29; points are claimed via claim_reward_points). Do not set together with is_reward", ge=0),
     ] = None,
     daily_section: Annotated[
         str | None,
@@ -188,7 +191,8 @@ async def create_task(
         Field(description="ID of a custom section from strategySettings.customStructure (customStructure strategy)"),
     ] = None,
     time_block_section: Annotated[
-        str | None, Field(description="Time block ID (from get_today_time_blocks) to place the task in")
+        str | None,
+        Field(description="Time block ID (from get_today_time_blocks). NOTE: stored, but no visible section link renders in Today even with the Time Block Sections strategy active (verified in the app 2026-08-29) — visible section assignment is done in the app"),
     ] = None,
 ) -> dict:
     """Create a task in Amazing Marvin. Prefer priority/frog over dates
@@ -315,26 +319,28 @@ async def update_task(
     ] = None,
     start_date: Annotated[
         str | None,
-        Field(description="Start date YYYY-MM-DD (the task is hidden/backburnered before it), '' removes"),
+        Field(description="Start date YYYY-MM-DD, '' removes. Mechanics (verified in the app 2026-08-29): the Start Dates strategy hides BACKBURNER items until their start date — combine with backburner=true and day='unassigned'; a scheduled task is not affected"),
     ] = None,
     end_date: Annotated[
         str | None, Field(description="Soft deadline YYYY-MM-DD (Start & End Dates strategy), '' removes")
     ] = None,
     planned_week: Annotated[
         str | None,
-        Field(description="Plan into a week: the week's Monday YYYY-MM-DD (Planning Ahead strategy), '' removes"),
+        Field(description="Plan into a week: the week's Monday YYYY-MM-DD (Planning Ahead strategy; verified in the app 2026-08-29 — also shows in the month view), '' removes (client cache may linger until a view switch)"),
     ] = None,
     planned_month: Annotated[
-        str | None, Field(description="Plan into a month: YYYY-MM (Planning Ahead strategy), '' removes")
+        str | None, Field(description="Plan into a month: YYYY-MM (Planning Ahead strategy, verified in the app 2026-08-29), '' removes")
     ] = None,
     review_date: Annotated[
-        str | None, Field(description="Review date YYYY-MM-DD (Review Date strategy), '' removes")
+        str | None, Field(description="Review date YYYY-MM-DD, '' removes. Verified in the app 2026-08-29: shows in the Review view on the date; the day-view banner additionally requires the Review Alert workflow snippet")
     ] = None,
     backburner: Annotated[
-        bool | None, Field(description="True = put in the backburner (dormant), False = take out")
+        bool | None,
+        Field(description="True = put in the backburner, False = take out. NOTE: only effective on an UNSCHEDULED task — set day='unassigned' at the same time; scheduling trumps the flag in the UI (verified in the app 2026-08-29)"),
     ] = None,
     reward_points: Annotated[
-        float | None, Field(description="Reward points the task awards on completion, 0 removes", ge=0)
+        float | None,
+        Field(description="Reward points the task AWARDS on completion (coin + points in the list row when the Rewards strategy is on, verified in the app 2026-08-29), 0 removes. Do not set together with isReward", ge=0),
     ] = None,
     daily_section: Annotated[
         str | None,
@@ -349,23 +355,23 @@ async def update_task(
     ] = None,
     time_block_section: Annotated[
         str | None,
-        Field(description="Time block ID (from get_today_time_blocks) to place the task in, '' removes"),
+        Field(description="Time block ID (from get_today_time_blocks), '' removes. NOTE: stored, but no visible section link renders in Today even with the strategy active (verified in the app 2026-08-29)"),
     ] = None,
     snooze_until_unix_ms: Annotated[
         int | None,
-        Field(description="Snooze the task until unix time in milliseconds (itemSnoozeTime; hidden everywhere except the master list), 0 removes", ge=0),
+        Field(description="Snooze the task until unix time in milliseconds (itemSnoozeTime), 0 removes. Verified in the app 2026-08-29: hides from Today AND the category view (the wiki's 'everywhere except the master list' does not hold for the category view)", ge=0),
     ] = None,
     perma_snooze_time: Annotated[
         str | None,
-        Field(description="Hide the task every day until HH:mm (permaSnoozeTime), '' removes"),
+        Field(description="Hide the task every day until HH:mm (permaSnoozeTime), '' removes. Verified in the app 2026-08-29"),
     ] = None,
     orbit: Annotated[
         bool | None,
-        Field(description="Orbit strategy: True = put in orbit. UNDOCUMENTED field (missing from the official data types; bool type verified in live data 2026-08-29) — consider reading the current value first"),
+        Field(description="Orbit strategy: True = put in orbit (verified in the app 2026-08-29: shows in the Orbit view + orbit icon in Today). UNDOCUMENTED field (missing from the official data types)"),
     ] = None,
     no_auto_orbit: Annotated[
         bool | None,
-        Field(description="Orbit strategy: True = exempt the task from automatic orbiting. UNDOCUMENTED field (bool type verified in live data 2026-08-29)"),
+        Field(description="Orbit strategy: True = exempt the task from automatic orbiting (auto-orbit otherwise pulls in scheduled tasks). UNDOCUMENTED field (bool type verified in live data 2026-08-29)"),
     ] = None,
 ) -> dict:
     """Update fields on an existing TASK via /doc/update (Full Access Token).
@@ -565,11 +571,11 @@ async def create_category_or_project(
     ] = None,
     icon: Annotated[
         str | None,
-        Field(description="Icon name (as in the app's icon picker). Categories ONLY at creation — /addProject ignores the field; set it via update_category_or_project afterwards"),
+        Field(description="Icon name with a library prefix, e.g. 'lucide-Rocket' (Lucide, PascalCase) or 'huge-happy' (verified in the app 2026-08-29); the app's picker also allows emoji. Categories ONLY — projects NEVER render their own icon (the flag stays; only the color is used)"),
     ] = None,
     time_estimate_minutes: Annotated[
         int | None,
-        Field(description="Time estimate in minutes (shown added to the children's estimates)", ge=1),
+        Field(description="Time estimate in minutes. NOTE: rendered as the project's OWN estimate — the UI does not aggregate it with the children's, despite the wiki's claim (verified in the app 2026-08-29)", ge=1),
     ] = None,
     planned_week: Annotated[
         str | None,
@@ -705,10 +711,12 @@ async def update_category_or_project(
     note: Annotated[str | None, Field(description="New note (replaces the existing one)")] = None,
     color: Annotated[str | None, Field(description="Color '#rrggbb', '' removes")] = None,
     icon: Annotated[
-        str | None, Field(description="Icon name (as in the app's icon picker), '' removes")
+        str | None,
+        Field(description="Icon name with a library prefix ('lucide-Rocket', 'huge-happy'), '' removes. ONLY meaningful on categories — projects never render their own icon (verified in the app 2026-08-29)"),
     ] = None,
     time_estimate_minutes: Annotated[
-        int | None, Field(description="Time estimate in minutes, 0 removes it", ge=0)
+        int | None,
+        Field(description="Time estimate in minutes, 0 removes it. On projects: rendered as the project's OWN estimate, no aggregation with the children's (verified in the app 2026-08-29)", ge=0),
     ] = None,
     start_date: Annotated[
         str | None, Field(description="Start date YYYY-MM-DD (Start & End Dates strategy), '' removes")
@@ -725,6 +733,10 @@ async def update_category_or_project(
     ] = None,
     review_date: Annotated[
         str | None, Field(description="Review date YYYY-MM-DD (Review Date strategy), '' removes")
+    ] = None,
+    first_scheduled: Annotated[
+        str | None,
+        Field(description="The app's bookkeeping field firstScheduled YYYY-MM-DD, '' removes — mainly for restoring the value from the convert tool's removed_project_fields after a conversion round trip (nothing backfills it, neither server nor app — verified 2026-08-29). Otherwise leave alone"),
     ] = None,
     day: Annotated[
         str | None,
@@ -746,11 +758,12 @@ async def update_category_or_project(
         Field(description="Projects ONLY: new labels (replaces existing ones, [] removes all)"),
     ] = None,
     backburner: Annotated[
-        bool | None, Field(description="True = put in the backburner (dormant), False = take out")
+        bool | None,
+        Field(description="True = put in the backburner, False = take out. NOTE (verified in the app 2026-08-29 on tasks): only effective on unscheduled items — scheduling trumps the flag"),
     ] = None,
     orbit: Annotated[
         bool | None,
-        Field(description="Orbit strategy: True = put in orbit. UNDOCUMENTED field (bool type verified in live data 2026-08-29) — consider reading the current value first"),
+        Field(description="Orbit strategy: True = put in orbit (verified in the app 2026-08-29 on tasks: Orbit view + icon in Today). UNDOCUMENTED field"),
     ] = None,
     no_auto_orbit: Annotated[
         bool | None,
@@ -759,13 +772,15 @@ async def update_category_or_project(
 ) -> dict:
     """Update fields on an existing CATEGORY or PROJECT via /doc/update
     (Full Access Token). For tasks, use update_task. Fields marked
-    'Projects ONLY' do not exist in the category data model — the tool does
-    not block the write (the document type is unknown here), so do not set
-    them on categories. Strategy-dependent fields (start/end date,
-    planned_week/month, review_date, backburner, orbit) can be set even when
-    the strategy is disabled in the app. Do not complete projects here
-    (done via /doc/update skips the app's side effects) — that is done in
-    the Marvin app.
+    'Projects ONLY' do not exist in the category data model — if any of
+    them is given, the tool first reads the document (1 extra API call) and
+    refuses if it is a category: project fields on a category make it
+    unrepairable from the app's UI (verified in the app 2026-08-29; repair
+    then requires /doc/update with null). Strategy-dependent fields
+    (start/end date, planned_week/month, review_date, orbit) can be set
+    even when the strategy is disabled in the app. Do not complete projects
+    here (done via /doc/update skips the app's side effects) — that is done
+    in the Marvin app.
     Note: Marvin's server can sporadically respond 500 on /doc/update
     (transient and atomic); just retry. But a PERMANENT 500 (persists across
     retries) means the document does not exist — deleted, or a
@@ -773,6 +788,29 @@ async def update_category_or_project(
     missing IDs, verified live 2026-08-29). Fetch a fresh ID via
     get_categories/get_children."""
     try:
+        project_only = {
+            "day": day, "due_date": due_date, "priority": priority,
+            "frog": frog, "label_ids": label_ids,
+        }
+        given = [name for name, val in project_only.items() if val is not None]
+        if given:
+            doc = await get_client().get_doc(item_id)
+            if not isinstance(doc, dict) or doc.get("db") != "Categories":
+                return {
+                    "error": (
+                        "The document is neither a category nor a project "
+                        "(db='Categories' required) — check item_id."
+                    )
+                }
+            if (doc.get("type") or "category") != "project":
+                return {
+                    "error": (
+                        f"The parameters {', '.join(given)} apply to projects only — "
+                        "the document is a category. Project fields on a category "
+                        "make it unrepairable from the app's UI (verified "
+                        "2026-08-29), so the write is blocked."
+                    )
+                }
         fields: dict[str, Any] = {}
         if title is not None:
             fields["title"] = title
@@ -800,6 +838,8 @@ async def update_category_or_project(
             fields["plannedMonth"] = planned_month or None
         if review_date is not None:
             fields["reviewDate"] = review_date or None
+        if first_scheduled is not None:
+            fields["firstScheduled"] = first_scheduled or None
         if day is not None:
             fields["day"] = local_today() if day == "today" else day
         if due_date is not None:

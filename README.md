@@ -254,6 +254,30 @@ Everything below was verified against the live API (2026-08-19 through
 - Calendar events created via `/addEvent` sync onwards only while the
   Marvin app is running somewhere (client-side calendar sync).
 
+**UI behavior of API-set fields (verified in the app, 2026-08-29)**
+- Toggling a strategy requires an app restart before its fields render —
+  without one, freshly enabled strategies show nothing and look broken.
+- `backburner` is only effective on unscheduled items: scheduling (`day`)
+  trumps the flag in the UI. Set `day: "unassigned"` together with
+  `backburner: true`.
+- `startDate` hides *backburner* items until their start date (the Start
+  Dates strategy's actual mechanic) — it does not hide scheduled tasks.
+- Icon names are library-prefixed (`lucide-Rocket`, `huge-happy`) or emoji.
+  Projects never render an own icon — the app offers the picker but only
+  the color is used.
+- A project's `timeEstimate` renders as its own estimate; the UI does
+  not aggregate it with the children's estimates, despite the wiki's claim.
+- Snoozed tasks (`itemSnoozeTime`) are hidden from the category view too —
+  the wiki's "everywhere except the master list" doesn't hold there.
+- `timeBlockSection` is stored but shows no visible section link in Today.
+- `reviewDate` shows in the Review view; the day-view banner additionally
+  requires the "Review Alert" workflow snippet.
+- Auto-orbit (if enabled) pulls newly scheduled tasks into Orbit unless
+  `noAutoOrbit` is set.
+- Project-only fields written onto a category are silently accepted by the
+  server but make the category unrepairable from the app's UI — which is
+  why `update_category_or_project` type-checks before writing them.
+
 ## How this differs from existing alternatives
 
 Several good Amazing Marvin MCP servers exist; this one was built fresh
