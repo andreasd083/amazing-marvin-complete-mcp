@@ -38,6 +38,17 @@ class MarvinError(Exception):
     """Error from Marvin's API, with no sensitive details."""
 
 
+class MarvinRateLimited(MarvinError):
+    """Marvin responded 429 — the limiter has entered its cool-down."""
+
+
+# Response headers that may be logged on a 429 (never cookies or anything
+# auth-related).
+SAFE_429_HEADERS = ("retry-after", "date", "content-type", "x-ratelimit-limit",
+                    "x-ratelimit-remaining", "x-ratelimit-reset", "ratelimit-limit",
+                    "ratelimit-remaining", "ratelimit-reset", "cf-ray")
+
+
 def local_tz_offset_minutes(now: datetime | None = None) -> int:
     """Marvin's timeZoneOffset: UTC offset in minutes (Pacific = -480)."""
     now = now or datetime.now(TIMEZONE)
@@ -67,6 +78,10 @@ class MarvinClient:
 
     async def aclose(self) -> None:
         await self._http.aclose()
+
+    @property
+    def limiter(self) -> RateLimiter:
+        return self._limiter
 
     def _headers_for(self, endpoint: str, *, force_full_access: bool = False) -> dict:
         needs_full = force_full_access or endpoint in FULL_ACCESS_ENDPOINTS
@@ -112,6 +127,25 @@ class MarvinClient:
             raise MarvinError(
                 f"Network error talking to Marvin: {type(exc).__name__}"
             ) from None
+        if resp.status_code == 429:
+            retry_after = None
+            try:
+                retry_after = float(resp.headers.get("retry-after", ""))
+            except ValueError:
+                pass
+            secs = self._limiter.note_429(retry_after)
+            # Log the headers once per 429 so we learn Marvin's window; only
+            # allow-listed headers, never cookies/auth.
+            shown = {k: v for k, v in resp.headers.items() if k.lower() in SAFE_429_HEADERS}
+            logger.warning(
+                "Marvin 429 on %s — all calls paused for %.0fs. Headers: %s (others: %s)",
+                endpoint, secs, shown,
+                sorted(k for k in resp.headers if k.lower() not in SAFE_429_HEADERS),
+            )
+            raise MarvinRateLimited(
+                f"Marvin responded 429 (Too many requests) on {endpoint}; "
+                f"all Marvin calls are paused for {secs:.0f}s."
+            )
         if resp.status_code >= 400:
             # The response body can contain useful error info but never tokens.
             body = resp.text[:300]
@@ -182,6 +216,15 @@ class MarvinClient:
     async def today_items(self, date: str | None = None) -> list:
         return await self.request(
             "GET", "/todayItems", params={"date": date or local_today()}
+        )
+
+    async def done_items(self, date: str | None = None) -> list:
+        # UNDOCUMENTED endpoint (missing from the OpenAPI spec and the wiki;
+        # live-tested 2026-08-30): lists completed tasks whose `day` is the
+        # date. Filters on day, not doneAt — see get_done_items. The limited
+        # API token is sufficient.
+        return await self.request(
+            "GET", "/doneItems", params={"date": date or local_today()}
         )
 
     async def due_items(self, by: str | None = None) -> list:

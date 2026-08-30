@@ -4,7 +4,8 @@
 
 An MCP ([Model Context Protocol](https://modelcontextprotocol.io)) server for
 [Amazing Marvin](https://amazingmarvin.com) with **complete coverage of the
-public API**: 36 tools over all ~31 documented endpoints, a global rate
+public API**: 37 tools over all ~31 documented endpoints (plus the
+undocumented `/doneItems`), a global rate
 limiter that respects Marvin's documented limits, least-privilege token
 routing, and MCP tool annotations. As of 1.1.0 every writable field in
 Marvin's official data model (Tasks and Categories/Projects) is either
@@ -23,12 +24,12 @@ which may be useful even if you never run this server.
 > you through setup and troubleshooting far faster than I can. Provided
 > as-is, without guarantees — it's MIT, fork freely.
 
-## Tools (36)
+## Tools (37)
 
 | Group | Tools |
 |---|---|
 | Core | `test_connection`, `create_task`, `mark_done`, `unmark_done`, `update_task`, `set_priority`, `delete_task` |
-| Reading | `get_today_items`, `get_due_items`, `get_children`, `get_categories` |
+| Reading | `get_today_items`, `get_due_items`, `get_done_items`, `get_children`, `get_categories` |
 | Structure | `create_category_or_project`, `update_category_or_project`, `convert_category_or_project` (experimental) |
 | Habits | `list_habits`, `get_habit`, `record_habit` |
 | Time blocks | `get_today_time_blocks`, `create_time_block` (experimental) |
@@ -206,7 +207,48 @@ Everything below was verified against the live API (2026-08-19 through
   `color`/`icon` (set them via `update_category_or_project`).
 - Projects are prioritized with the string field `priority`
   (`"high"`/`"mid"`/`"low"`), not `isStarred` like tasks (live-tested
-  2026-08-29) — which is why `set_priority` is task-only.
+  2026-08-29) — which is why `set_priority` is task-only. Mapping (verified
+  against the app's code 2026-08-30): `high` = Most important (red),
+  `mid` = Very important (orange), `low` = **Important** (yellow, the
+  one-star level). The app's fourth level *Low priority* (down arrow) is
+  stored on tasks as `isStarred: -1` (magic words `*low`/`*p0`); projects
+  do not have it — the app clears the priority when converting a low
+  priority task into a project. `set_priority`/`create_task` accept `-1`.
+- **Completed tasks are readable** via the **undocumented** endpoint
+  `GET /doneItems?date=YYYY-MM-DD` (missing from the OpenAPI spec and the
+  wiki; live-tested 2026-08-30, may disappear without notice). It filters
+  on the task's `day`, not on `doneAt`, and a past `day` survives
+  completion both in the app and via `/markDone` (the app sets `day` to
+  today only on unscheduled and future-dated tasks). `get_done_items`
+  therefore fetches the date plus a 7-day lookback window and filters on
+  `doneAt`; the response states its coverage (`covers_from`,
+  `days_fetched`), complete results are cached for 30 minutes, and on a
+  429 the tool returns what it got, flagged `incomplete`/`days_missing`.
+  Single completed tasks can also be read with `/doc?id=`. `/todayItems`,
+  `/dueItems` and `/children` exclude completed items; `/doneTasks` and
+  `/completedItems` are 404.
+- **Marvin returns 429 even with 3 s spacing** when the daily average
+  (1440/day = "1 per minute") is exceeded within a shorter, undocumented
+  window — observed 2026-08-30 after ~100 calls in one hour. After a 429
+  the limiter pauses all calls for 60 s (or `Retry-After`) and logs the
+  response headers (allow-listed names only).
+- **The server validates no writes** (live-tested 2026-08-29): invalid
+  dates, negative/out-of-range numbers, mistyped values, empty titles,
+  dead parentId/labelIds and unknown fields are stored verbatim via
+  `/doc/update` (and almost everything via `/addTask`). The tools therefore
+  validate dates (strict YYYY-MM-DD, year 2000-2100), titles and numeric
+  ranges client-side; references are not validated (orphan risk documented
+  in the descriptions).
+- `/doc/delete` responds 200 even for IDs that never existed or are already
+  deleted — idempotent, no 404 (unlike `/doc/update`). `/markDone` on the
+  other hand gives a proper 404 for a missing ID and 400 for an already
+  completed task — three endpoints, three different answers to "does not
+  exist" (live-tested 2026-08-29).
+- Read endpoints (`/todayItems`, `/dueItems`) are pure date filters:
+  backburner, startDate and orphan status (dead parentId) do not affect
+  them — and orphans never show up under `unassigned` (live-tested
+  2026-08-29). `/markDone` stops running time tracking (receipt in
+  `/tracks`) but does not write `task.times`.
 - `orbit`/`noAutoOrbit` are missing from the wiki's data types but present
   in live data (bool, verified 2026-08-29) — exposed as explicitly
   undocumented passthrough parameters on the update tools.

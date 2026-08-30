@@ -1,6 +1,7 @@
 """MCP server for Amazing Marvin with complete public-API coverage.
 
-36 tools covering all ~31 documented public endpoints: core CRUD + priority,
+37 tools covering all ~31 documented public endpoints (plus the undocumented
+/doneItems): core CRUD + priority,
 habits, time blocks (read + experimental create), time tracking, labels,
 goals, reminders, and kudos/reward points. Deliberately no Smart List /
 task-picking logic — Marvin's own Spotlight does the picking.
@@ -17,16 +18,17 @@ of the README for the full list.
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
 from pydantic import Field
 
 from .client import MarvinClient, MarvinError, local_today
-from .config import Settings, load_settings
+from .config import TIMEZONE, Settings, load_settings
 from .ratelimit import DailyBudgetExceeded, QueueTimeout, RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,12 @@ mcp: FastMCP = FastMCP(name="amazing-marvin")
 
 _client: MarvinClient | None = None
 _limiter: RateLimiter | None = None
+
+# Cache for get_done_items: (date, lookback) -> (expires monotonic, result).
+# Only complete results are cached; a daily-summary routine may run several
+# times a day and a cold run costs lookback+1 read calls.
+DONE_CACHE_TTL_S = 30 * 60
+_done_cache: dict[tuple[str, int], tuple[float, dict]] = {}
 
 
 def get_client() -> MarvinClient:
@@ -48,6 +56,34 @@ def init(settings: Settings, transport=None) -> None:
     global _client, _limiter
     _limiter = RateLimiter(state_file=settings.state_dir / "ratelimit-state.json")
     _client = MarvinClient(settings, _limiter, transport=transport)
+    _done_cache.clear()
+
+
+def day_bounds_ms(date_str: str) -> tuple[float, float]:
+    """[start, end) of a day in the configured timezone, epoch milliseconds."""
+    start = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=TIMEZONE)
+    return start.timestamp() * 1000, (start + timedelta(days=1)).timestamp() * 1000
+
+
+def remember_done(doc: Any) -> None:
+    """mark_done bonus: insert the just-completed task into warm
+    get_done_items caches whose day covers doneAt, so completions made
+    through this server show up in the next call without cold reads."""
+    if not isinstance(doc, dict) or not doc.get("done") or not doc.get("_id"):
+        return
+    done_at = doc.get("doneAt")
+    if not isinstance(done_at, (int, float)):
+        return
+    for (date_str, _lookback), (_expires, result) in _done_cache.items():
+        lo, hi = day_bounds_ms(date_str)
+        if not (lo <= done_at < hi):
+            continue
+        items = result["items"]
+        if any(i.get("_id") == doc["_id"] for i in items):
+            continue
+        items.append(doc)
+        items.sort(key=lambda i: i.get("doneAt", 0))
+        result["count"] = len(items)
 
 
 def now_ms() -> int:
@@ -79,6 +115,41 @@ def check_planned_week(value: str) -> None:
         raise MarvinError(
             f"planned_week must be the week's Monday (YYYY-MM-DD); {value} is not a Monday."
         )
+
+
+def check_iso_date(value: str, name: str) -> None:
+    """The server validates no dates — '2026-02-31', '31-12-2026' and year
+    0025 are stored verbatim (live-tested 2026-08-29), so all validation
+    happens here."""
+    # strptime is too lenient (accepts '2026-9-1' and year 0025) — require the
+    # exact form and a plausible year; form data has produced year 0025 in
+    # real use.
+    ok = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", value))
+    if ok:
+        try:
+            ok = 2000 <= datetime.strptime(value, "%Y-%m-%d").year <= 2100
+        except ValueError:
+            ok = False
+    if not ok:
+        raise MarvinError(
+            f"{name} must be a valid date YYYY-MM-DD (year 2000-2100), got {value!r}. "
+            "The server does not validate and stores invalid dates verbatim."
+        )
+
+
+def check_day(value: str, name: str = "day", allow_unassigned: bool = True) -> None:
+    if value == "today" or (allow_unassigned and value == "unassigned"):
+        return
+    check_iso_date(value, name)
+
+
+def clean_title(title: str) -> str:
+    """The server accepts empty/whitespace titles and stores surrounding
+    whitespace verbatim (live-tested 2026-08-29)."""
+    cleaned = title.strip()
+    if not cleaned:
+        raise MarvinError("The title must not be empty (the server would otherwise create an untitled item).")
+    return cleaned
 
 
 def check_planned_month(value: str) -> None:
@@ -139,14 +210,15 @@ async def create_task(
     title: Annotated[str, Field(description="Task title")],
     parent_id: Annotated[
         str | None,
-        Field(description="ID of the category/project the task belongs in (from get_categories). Omit for the Inbox."),
+        Field(description="ID of the category/project the task belongs in (from get_categories). Omit for the Inbox. NOTE: the server does not validate the ID — a wrong parentId yields an orphan reachable only via date reads (live-tested 2026-08-29)"),
     ] = None,
     day: Annotated[
         str | None,
         Field(description="Schedule on date YYYY-MM-DD, or 'today'. Omit for unscheduled."),
     ] = None,
     priority: Annotated[
-        int | None, Field(description="Priority 1-3 (3=red/highest, 2=orange, 1=yellow)", ge=1, le=3)
+        int | None,
+        Field(description="Priority (isStarred): 3=Most important/red, 2=Very important/orange, 1=Important/yellow, -1=Low priority (down arrow; shown in the app only with 'Enable low priority' on in the Priorities strategy — the value is stored regardless). 0 is not valid here; omit for no priority", ge=-1, le=3),
     ] = None,
     frog: Annotated[
         int | None, Field(description="Frog marker 1=normal, 2=baby, 3=monster", ge=1, le=3)
@@ -214,12 +286,15 @@ async def create_task(
     stored even when the strategy is disabled in the app — they just are
     not shown in the UI then."""
     try:
-        data: dict[str, Any] = {"title": title, "done": False}
+        data: dict[str, Any] = {"title": clean_title(title), "done": False}
         if parent_id:
             data["parentId"] = parent_id
         if day:
+            check_day(day, allow_unassigned=False)
             data["day"] = local_today() if day == "today" else day
         if priority is not None:
+            if priority == 0:
+                raise MarvinError("priority=0 is not valid when creating — omit the parameter.")
             data["isStarred"] = priority
         if frog is not None:
             data["isFrogged"] = frog
@@ -228,6 +303,7 @@ async def create_task(
         if label_ids:
             data["labelIds"] = label_ids
         if due_date:
+            check_iso_date(due_date, "due_date")
             data["dueDate"] = due_date
         if time_estimate_minutes is not None:
             data["timeEstimate"] = time_estimate_minutes * 60_000
@@ -238,6 +314,7 @@ async def create_task(
             check_planned_month(planned_month)
             data["plannedMonth"] = planned_month
         if review_date:
+            check_iso_date(review_date, "review_date")
             data["reviewDate"] = review_date
         if backburner is not None:
             data["backburner"] = backburner
@@ -270,11 +347,20 @@ async def mark_done(
     the app's side effects). Safe for generated instances of recurring tasks
     too (verified live): the instance ID is deterministic
     ('YYYY-MM-DD_<recurringTaskId>'), so no duplicates can occur.
-    A permanent 500 = the task does not exist (deleted; the server responds
-    500 instead of 404 for missing IDs, verified live 2026-08-29) — fetch a
-    fresh ID."""
+    Error codes (live-tested 2026-08-29): 404 = the task does not exist
+    (deleted/wrong ID — unlike /doc/update, which responds 500);
+    400 = already marked done (harmless, nothing changes). Stops running
+    time tracking on the task (receipt in /tracks; task.times is NOT
+    written by the server). Pinned task: the original stays open and
+    pinned as documented; the completed copy gets its own ID and can be
+    found via get_done_items. Leaves `day` untouched; the app sets day =
+    today only on unscheduled and future-dated tasks, a past day is kept
+    there too (app code, 2026-08-30). Completed tasks can be read back with
+    /doc (by ID) and listed with get_done_items."""
     try:
-        return {"completed": await get_client().mark_done(item_id)}
+        result = await get_client().mark_done(item_id)
+        remember_done(result)
+        return {"completed": result}
     except Exception as e:
         return tool_error(e)
 
@@ -303,7 +389,7 @@ async def unmark_done(
 async def update_task(
     item_id: Annotated[str, Field(description="Task ID")],
     title: Annotated[str | None, Field(description="New title")] = None,
-    parent_id: Annotated[str | None, Field(description="Move to category/project ID")] = None,
+    parent_id: Annotated[str | None, Field(description="Move to category/project ID (not validated by the server — a wrong ID yields an orphan, live-tested 2026-08-29)")] = None,
     day: Annotated[
         str | None,
         Field(description="Schedule on YYYY-MM-DD, 'today', or 'unassigned' to unschedule"),
@@ -393,22 +479,29 @@ async def update_task(
     try:
         fields: dict[str, Any] = {}
         if title is not None:
-            fields["title"] = title
+            fields["title"] = clean_title(title)
         if parent_id is not None:
             fields["parentId"] = parent_id
         if day is not None:
+            check_day(day)
             fields["day"] = local_today() if day == "today" else day
         if note is not None:
             fields["note"] = note
         if due_date is not None:
+            if due_date:
+                check_iso_date(due_date, "due_date")
             fields["dueDate"] = due_date or None
         if label_ids is not None:
             fields["labelIds"] = label_ids
         if time_estimate_minutes is not None:
             fields["timeEstimate"] = time_estimate_minutes * 60_000 or None
         if start_date is not None:
+            if start_date:
+                check_iso_date(start_date, "start_date")
             fields["startDate"] = start_date or None
         if end_date is not None:
+            if end_date:
+                check_iso_date(end_date, "end_date")
             fields["endDate"] = end_date or None
         if planned_week is not None:
             if planned_week:
@@ -419,6 +512,8 @@ async def update_task(
                 check_planned_month(planned_month)
             fields["plannedMonth"] = planned_month or None
         if review_date is not None:
+            if review_date:
+                check_iso_date(review_date, "review_date")
             fields["reviewDate"] = review_date or None
         if backburner is not None:
             fields["backburner"] = backburner
@@ -453,7 +548,7 @@ async def set_priority(
     item_id: Annotated[str, Field(description="Task ID")],
     priority: Annotated[
         int | None,
-        Field(description="Priority: 3=red/highest, 2=orange, 1=yellow, 0=remove", ge=0, le=3),
+        Field(description="Priority (isStarred): 3=Most important/red, 2=Very important/orange, 1=Important/yellow, -1=Low priority (down arrow), 0=remove", ge=-1, le=3),
     ] = None,
     frog: Annotated[
         int | None,
@@ -461,9 +556,13 @@ async def set_priority(
     ] = None,
 ) -> dict:
     """Set or change priority (isStarred) and/or the frog marker on an
-    existing TASK. Requires the Full Access Token. Does not apply to
-    projects: they use the string field priority ('high'/'mid'/'low'), not
-    isStarred (verified live 2026-08-29) — set it via
+    existing TASK. Requires the Full Access Token. The app's four levels are
+    stored as isStarred 3/2/1/-1 (Most/Very/Important/Low priority; -1
+    verified against the app's code and live-tested 2026-08-30). Low
+    priority is shown in the app only with 'Enable low priority' on in the
+    Priorities strategy; the value is stored regardless. Does not apply to
+    projects: they use the string field priority ('high'/'mid'/'low' =
+    Most/Very/Important; no Low level), not isStarred — set it via
     update_category_or_project. A permanent 500 = the task does not exist
     (deleted or wrong ID) — the server responds 500 instead of 404
     (verified live 2026-08-29); fetch a fresh ID."""
@@ -531,6 +630,100 @@ async def get_due_items(
 
 
 @mcp.tool(annotations=READONLY)
+async def get_done_items(
+    date: Annotated[
+        str | None,
+        Field(description="Date YYYY-MM-DD on which tasks were completed (configured timezone); omit for today"),
+    ] = None,
+    lookback_days: Annotated[
+        int,
+        Field(description="Days before the date for which /doneItems is also fetched, to catch tasks scheduled earlier but completed on the date. Each day = one read call (~3.1 s in the queue). Default 7", ge=0, le=14),
+    ] = 7,
+) -> dict:
+    """Tasks completed on a given date (doneAt within that day, configured
+    timezone) — regardless of priority and deadline. Built on the
+    UNDOCUMENTED endpoint GET /doneItems?date= (missing from the OpenAPI
+    spec and the wiki; live-tested 2026-08-30, may disappear): it filters
+    on the task's `day`, not on doneAt. A past `day` is kept on completion
+    both in the app and via the API (the app sets day = today only on
+    unscheduled and future-dated tasks) — hence the date plus lookback_days
+    earlier are fetched and everything is filtered on doneAt.
+    The response always states its coverage: covers_from (= date − lookback)
+    and days_fetched. On a 429/error the fetch stops: incomplete=true,
+    days_missing lists the days not fetched and warning explains; the
+    date's own completions are always included because it is fetched
+    first. Complete results are cached for 30 minutes (cached=true) —
+    repeated calls then cost no API calls; mark_done inserts its task into
+    the cache. Not covered: a task with a FUTURE day completed via the API
+    (it sits under its day). Tasks only — completed projects are not
+    listed. Items without doneAt (older data) are excluded and counted in
+    skipped_without_done_at. Sorted by doneAt. Cost: one read call per day
+    (~3.1 s each in the queue)."""
+    try:
+        target = date or local_today()
+        check_iso_date(target, "date")
+        key = (target, lookback_days)
+        cached = _done_cache.get(key)
+        if cached and cached[0] > time.monotonic():
+            return {**cached[1], "cached": True}
+        start = datetime.strptime(target, "%Y-%m-%d").replace(tzinfo=TIMEZONE)
+        lo, hi = day_bounds_ms(target)
+        client = get_client()
+        seen: dict[str, dict] = {}
+        skipped = 0
+        fetched = 0
+        missing: list[str] = []
+        warning: str | None = None
+        for back in range(lookback_days + 1):
+            day = (start - timedelta(days=back)).strftime("%Y-%m-%d")
+            if warning is not None or client.limiter.cooldown_remaining > 0:
+                missing.append(day)
+                if warning is None:
+                    warning = (
+                        f"Marvin calls paused after a 429 ({client.limiter.cooldown_remaining:.0f}s left)."
+                    )
+                continue
+            try:
+                day_items = await client.done_items(day)
+            except (MarvinError, DailyBudgetExceeded, QueueTimeout) as e:
+                warning = str(e)
+                missing.append(day)
+                continue
+            fetched += 1
+            for item in day_items:
+                if not isinstance(item, dict) or not item.get("done"):
+                    continue
+                done_at = item.get("doneAt")
+                if not isinstance(done_at, (int, float)):
+                    skipped += 1
+                    continue
+                if lo <= done_at < hi:
+                    seen.setdefault(str(item.get("_id")), item)
+        items = sorted(seen.values(), key=lambda i: i["doneAt"])
+        result: dict[str, Any] = {
+            "date": target,
+            "lookback_days": lookback_days,
+            "covers_from": (start - timedelta(days=lookback_days)).strftime("%Y-%m-%d"),
+            "days_fetched": fetched,
+            "count": len(items),
+            "items": items,
+            "skipped_without_done_at": skipped,
+        }
+        if missing:
+            result["incomplete"] = True
+            result["days_missing"] = missing
+            result["warning"] = (
+                f"The list is incomplete: {len(missing)} of {lookback_days + 1} days "
+                f"could not be fetched ({warning})"
+            )
+        else:
+            _done_cache[key] = (time.monotonic() + DONE_CACHE_TTL_S, result)
+        return result
+    except Exception as e:
+        return tool_error(e)
+
+
+@mcp.tool(annotations=READONLY)
 async def get_children(
     parent_id: Annotated[
         str,
@@ -538,7 +731,10 @@ async def get_children(
     ],
 ) -> dict:
     """Get open tasks and subprojects in a category/project. Returns direct
-    children only — call again for deeper levels."""
+    children only — call again for deeper levels. Note: orphans (tasks whose
+    parentId points to a deleted/non-existent document) do NOT show up under
+    'unassigned' — only in get_today_items/get_due_items if they have a
+    day/dueDate (live-tested 2026-08-29)."""
     try:
         items = await get_client().children(parent_id)
         return {"parent_id": parent_id, "count": len(items), "items": items}
@@ -597,7 +793,7 @@ async def create_category_or_project(
     ] = None,
     priority: Annotated[
         Literal["high", "mid", "low"] | None,
-        Field(description="Projects ONLY: priority as a string — projects do not use isStarred (verified live 2026-08-29)"),
+        Field(description="Projects ONLY: priority as a string — high=Most important (red), mid=Very important (orange), low=Important (yellow, the one-star level — NOT the app's 'Low priority', which projects do not have). Projects do not use isStarred (verified live 2026-08-29; mapping verified against the app's code 2026-08-30)"),
     ] = None,
     frog: Annotated[
         int | None,
@@ -645,7 +841,7 @@ async def create_category_or_project(
                         "update_category_or_project."
                     )
                 }
-            data: dict[str, Any] = {"title": title, "parentId": parent_id, "done": False}
+            data: dict[str, Any] = {"title": clean_title(title), "parentId": parent_id, "done": False}
             if note:
                 data["note"] = note
             if time_estimate_minutes is not None:
@@ -657,10 +853,13 @@ async def create_category_or_project(
                 check_planned_month(planned_month)
                 data["plannedMonth"] = planned_month
             if review_date:
+                check_iso_date(review_date, "review_date")
                 data["reviewDate"] = review_date
             if day:
+                check_day(day, allow_unassigned=False)
                 data["day"] = local_today() if day == "today" else day
             if due_date:
+                check_iso_date(due_date, "due_date")
                 data["dueDate"] = due_date
             if priority:
                 data["priority"] = priority
@@ -676,7 +875,7 @@ async def create_category_or_project(
             "_id": uuid.uuid4().hex,
             "db": "Categories",
             "type": "category",
-            "title": title,
+            "title": clean_title(title),
             "parentId": parent_id,
             "createdAt": now_ms(),
         }
@@ -695,6 +894,7 @@ async def create_category_or_project(
             check_planned_month(planned_month)
             doc["plannedMonth"] = planned_month
         if review_date:
+            check_iso_date(review_date, "review_date")
             doc["reviewDate"] = review_date
         return {"created": await get_client().create_doc(doc)}
     except Exception as e:
@@ -747,7 +947,7 @@ async def update_category_or_project(
     ] = None,
     priority: Annotated[
         Literal["high", "mid", "low", ""] | None,
-        Field(description="Projects ONLY: priority 'high'/'mid'/'low', '' removes. Projects use the string field priority, not isStarred (verified live 2026-08-29)"),
+        Field(description="Projects ONLY: 'high'=Most important (red), 'mid'=Very important (orange), 'low'=Important (yellow, the one-star level — NOT the app's 'Low priority', which projects do not have), '' removes. Projects use the string field priority, not isStarred (verified live 2026-08-29; mapping verified against the app's code 2026-08-30)"),
     ] = None,
     frog: Annotated[
         int | None,
@@ -813,7 +1013,7 @@ async def update_category_or_project(
                 }
         fields: dict[str, Any] = {}
         if title is not None:
-            fields["title"] = title
+            fields["title"] = clean_title(title)
         if parent_id is not None:
             fields["parentId"] = parent_id
         if note is not None:
@@ -825,8 +1025,12 @@ async def update_category_or_project(
         if time_estimate_minutes is not None:
             fields["timeEstimate"] = time_estimate_minutes * 60_000 or None
         if start_date is not None:
+            if start_date:
+                check_iso_date(start_date, "start_date")
             fields["startDate"] = start_date or None
         if end_date is not None:
+            if end_date:
+                check_iso_date(end_date, "end_date")
             fields["endDate"] = end_date or None
         if planned_week is not None:
             if planned_week:
@@ -837,12 +1041,19 @@ async def update_category_or_project(
                 check_planned_month(planned_month)
             fields["plannedMonth"] = planned_month or None
         if review_date is not None:
+            if review_date:
+                check_iso_date(review_date, "review_date")
             fields["reviewDate"] = review_date or None
         if first_scheduled is not None:
+            if first_scheduled:
+                check_iso_date(first_scheduled, "first_scheduled")
             fields["firstScheduled"] = first_scheduled or None
         if day is not None:
+            check_day(day)
             fields["day"] = local_today() if day == "today" else day
         if due_date is not None:
+            if due_date:
+                check_iso_date(due_date, "due_date")
             fields["dueDate"] = due_date or None
         if priority is not None:
             fields["priority"] = priority or None

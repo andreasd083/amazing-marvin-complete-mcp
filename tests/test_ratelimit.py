@@ -74,3 +74,15 @@ async def test_concurrent_acquires_serialized(monkeypatch):
     await asyncio.gather(*(limiter.acquire(is_write=False) for _ in range(4)))
     assert time.monotonic() - t0 >= 0.15
     assert limiter.calls_today == 4
+
+
+async def test_note_429_sets_cooldown_and_delays_next_call(monkeypatch):
+    monkeypatch.setattr(ratelimit, "COOLDOWN_S", 0.2)
+    limiter = RateLimiter()
+    assert limiter.cooldown_remaining == 0
+    assert limiter.note_429(None) == 0.2
+    assert 0 < limiter.cooldown_remaining <= 0.2
+    t0 = time.monotonic()
+    await limiter.acquire(is_write=False)
+    assert time.monotonic() - t0 >= 0.15
+    assert limiter.note_429(5.0) == 5.0  # a longer Retry-After wins

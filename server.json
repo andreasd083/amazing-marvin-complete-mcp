@@ -2,18 +2,18 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.andreasd083/amazing-marvin-complete-mcp",
   "title": "Amazing Marvin (complete)",
-  "description": "Amazing Marvin task manager: complete public-API coverage (34 tools) with built-in rate limiting",
+  "description": "Amazing Marvin task manager: complete public-API coverage (37 tools) with built-in rate limiting",
   "repository": {
     "url": "https://github.com/andreasd083/amazing-marvin-complete-mcp",
     "source": "github"
   },
-  "version": "1.3.0",
+  "version": "1.4.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "amazing-marvin-complete-mcp",
-      "version": "1.3.0",
+      "version": "1.4.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

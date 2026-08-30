@@ -38,14 +38,102 @@ Orbit view unless `noAutoOrbit` is set.
 - `/addProject` **ignores `color`/`icon`**; `/doc/create` (categories) and
   `/doc/update` (both) persist them.
 - Projects are prioritized with the **string field `priority`**
-  (`"high"`/`"mid"`/`"low"`); `isStarred` is never set on projects. Tasks
-  use `isStarred` (1–3).
+  (`"high"`/`"mid"`/`"low"` = Most/Very/Important); `isStarred` is never
+  set on projects. Tasks use `isStarred` (-1, 1–3; -1 = Low priority).
 - `/doc/update` with `val: null` **clears** a field (the tools' `''`/`0`
   conventions build on this).
 - `orbit`, `noAutoOrbit` (bool) and `firstOrbitDate` (`YYYY-MM-DD`) exist in
   live data but are **entirely missing from the wiki's data types** — the
   bool fields are exposed as explicitly-undocumented passthrough,
   `firstOrbitDate` is left to the app.
+
+## Level 2 — edge values (live-tested 2026-08-29)
+
+**The server validates essentially nothing.** Via `/doc/update` everything
+is stored verbatim with 200: invalid dates (`2026-02-31`, `31-12-2026`,
+`2026-13-01`, year `0025`, the literal `"today"`, surrounding whitespace),
+negative numbers (`timeEstimate -1`, `rewardPoints -5`), out-of-range
+values (`isStarred 7`, `isFrogged -2`), extreme numbers (`timeEstimate
+1e15`), mistyped values (`isStarred "3"`, `timeEstimate "900000"`,
+`labelIds "string"`, `done "true"`), empty/5000-character/multi-line
+titles, 20,000-character notes, dead references (`parentId`/`labelIds`
+that do not exist — producing orphans) and entirely unknown fields.
+Projects: `priority "urgent"`/`"HIGH"` are stored just as silently.
+`/addTask` is almost as permissive (empty title, invalid `day`, negative
+estimate, `isStarred 9`, dead references) — only pure type errors
+(`timeEstimate "abc"`, `isStarred "high"`) give 400. Empty setters => 200.
+`/doc/delete` gives 200 for IDs that never existed and for already deleted
+ones (idempotent, no 404 — inconsistent with `/doc/update`, which gives 500).
+
+**Consequence (1.4.0):** all validation lives in the tools, before the API
+call: strict `YYYY-MM-DD` + valid calendar date + year 2000-2100 on every
+date parameter (`'today'`/`'unassigned'` where allowed), titles are trimmed
+and must not be empty, plus the pre-existing Monday check on plannedWeek
+and Literal/ge/le on numbers and priority. Dead references
+(parent_id/label_ids) are NOT validated (it would cost a read call per
+write) — documented in the descriptions as an orphan risk.
+
+## Level 3 — interactions/side effects (live-tested 2026-08-29)
+
+- **Read endpoints are pure date filters:** `/todayItems` lists tasks with
+  `day` = the date regardless of `backburner=true` or a future `startDate`
+  — all such hiding is client logic. `day` + `plannedWeek` at the same
+  time is allowed; `/markDone` leaves `plannedWeek` untouched.
+- **Orphans** (dead `parentId`) show up in `/todayItems`/`/dueItems` if
+  they have `day`/`dueDate`, but NOT under `/children?parentId=unassigned`
+  — without a date they are unreachable via the API.
+- **`/markDone` stops time tracking** (receipt in `/tracks`, 2 entries)
+  but does NOT write `task.times` — `/tracks` is the only source of truth,
+  even after completion (the wiki's "updated when marked done" applies to
+  the client).
+- **`/markDone` error codes:** already done => 400; missing ID => **404**
+  (unlike `/doc/update` => 500 and `/doc/delete` => 200 — three different
+  answers to the same error).
+- **Pinned task + `/markDone`:** the original stays open and pinned
+  (documented behavior); the completed copy gets its own ID and can be
+  found via `/doneItems` (see Level 4).
+- Recurrence generators deliberately NOT tested (they touch the app's
+  `createdUpTo` bookkeeping).
+
+## Level 4 — completed items and priority levels (live-tested 2026-08-30)
+
+- **Completed tasks ARE readable:** `/doc?id=` returns the item with
+  `done: true` and `doneAt`, and the **undocumented**
+  `GET /doneItems?date=YYYY-MM-DD` (200 with a list, only `db: "Tasks"`,
+  the limited token is sufficient) lists completed tasks. Without `date`
+  => today. `/doneTasks`, `/completedItems` => 404; `done=1`/
+  `includeDone=true` on `/todayItems` and `/children` are ignored. Zero
+  mentions of the endpoint in the wiki, the OpenAPI spec and the issues —
+  it may disappear without notice.
+- **`/doneItems` filters on `day`, not `doneAt`:** a task with `day` =
+  yesterday / 10 days ago / tomorrow completed today is listed under its
+  `day`. `/markDone` sets `day` = today on an UNSCHEDULED task but leaves
+  an existing `day` untouched; the app's markDone does the same for past
+  `day` values and sets today only on unscheduled and FUTURE tasks (app
+  code: `k = getDay(task); if (!k || k === "unassigned" || k > today)
+  k = today`). An overdue task ticked off in the app therefore stays under
+  its old date — hence the 7-day lookback + doneAt filter in
+  `get_done_items`.
+- **429 without breaking the 3 s rule** (2026-08-30): `/doneItems`
+  answered `429 Too many AM API requests` on the eighth consecutive read
+  at 3.05–3.1 s spacing, after ~100 calls in the same hour. Reading:
+  the daily average is enforced in a rolling window of roughly an hour.
+  No `Retry-After` known — response headers are now logged on a 429. The
+  limiter enters a 60 s cool-down; `get_done_items` returns a partial
+  result instead of an error.
+- **Low priority = `isStarred: -1`** (app code: the `priorityLow` action
+  sets -1, magic words `*low`/`*p0`/"low priority"; shown only with
+  `priorities.lowPriority` enabled). `/addTask` and `/doc/update` store
+  -1 and read it back.
+- **Project `priority` string <-> star level** (app code, unambiguous in
+  the edit dialog, Smart List filters, sorting and conversion):
+  `high` = 3 = Most important, `mid` = 2 = Very important,
+  `low` = 1 = **Important** (yellow). A task with -1 converted into a
+  project gets `priority: null` — projects cannot be Low priority. (One
+  tooltip string in the app calls `low` "Low priority"; it is contradicted
+  by all other code and by the UI verification "priority=high -> red".)
+- Live data: `isStarred` occurs as `0`, `1`, `2`, `3`, `False` and the
+  string `'3'` (imports) — read with `int()` tolerance.
 
 ## Tasks
 
@@ -63,9 +151,9 @@ Orbit view unless `noAutoOrbit` is set.
 | `timeEstimate` | supported | `create_task`, `update_task` (minutes → ms) |
 | `note` | supported | `create_task`, `update_task` |
 | `labelIds` | supported | `create_task`, `update_task` |
-| `isStarred` | supported | `create_task` (`priority` 1–3), `set_priority` |
+| `isStarred` | supported | `create_task` (`priority` -1/1–3), `set_priority` (-1/0–3) — -1 = Low priority (down arrow), verified 2026-08-30 |
 | `isFrogged` | supported | `create_task` (`frog`), `set_priority` |
-| `done`/`doneAt` | supported | `mark_done` (via `/markDone` — never `/doc/update`, MarvinAPI issue #6), `unmark_done` |
+| `done`/`doneAt` | supported | `mark_done` (via `/markDone` — never `/doc/update`, MarvinAPI issue #6), `unmark_done`; reading via `get_done_items` (undocumented `/doneItems`, Level 4) |
 | `backburner` | supported | `create_task`, `update_task` — only effective on unscheduled tasks; day trumps the flag in the UI (verified in the app 2026-08-29) |
 | `isReward` | supported (discouraged) | `create_task` — documented Task field with no observed function: the app's purchasable rewards are separate `db="Rewards"` documents that the public API cannot reach (live-tested 2026-08-29: /rewards and variants 404, no rewards profile documents, app rewards are not Tasks); the flag produced no UI effect |
 | `rewardPoints` | supported | `create_task`, `update_task` — points the task AWARDS; coin + points in the list row with the Rewards strategy on (verified in the app 2026-08-29) |
@@ -105,7 +193,7 @@ Orbit view unless `noAutoOrbit` is set.
 | `reviewDate` | supported | `create_category_or_project`, `update_category_or_project` |
 | `day` | supported (projects only) | `create_category_or_project`, `update_category_or_project` — categories cannot be scheduled |
 | `dueDate` | supported (projects only) | as `day` |
-| `priority` | supported (projects only) | the string field `"high"`/`"mid"`/`"low"` — not `isStarred`; renders as a red ring in lists / red star in the panel (verified in the app 2026-08-29) |
+| `priority` | supported (projects only) | the string field `"high"`/`"mid"`/`"low"` = Most/Very/Important (3/2/1 stars; Level 4) — not `isStarred`, no Low level; `high` renders as a red ring in lists / red star in the panel (verified in the app 2026-08-29) |
 | `isFrogged` | supported (projects only) | `create_category_or_project` (`frog`), `update_category_or_project` |
 | `labelIds` | supported (projects only) | `create_category_or_project`, `update_category_or_project` — categories: the field is not part of the data model and the tools block it; the app attaches labels to categories only through its own Kanban drag flow (observed 2026-08-29: an API-created category could not be given a label any other way) |
 | `backburner` | supported (update only) | `update_category_or_project` — same condition as Tasks (unscheduled item) |

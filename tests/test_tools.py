@@ -558,3 +558,190 @@ async def test_record_habit_integral_value_sent_as_int(init_server, transport):
     await server.record_habit.fn(habit_id="h1", value=2.5)
     body = transport.last_json()
     assert body["value"] == 2.5
+
+
+# ---- Level 2 (edge values, live-tested 2026-08-29): the server validates
+# nothing — invalid dates, empty titles etc. are stored verbatim. All
+# validation therefore has to happen in the tools, before the API call.
+
+
+async def test_create_task_rejects_invalid_due_date(init_server, transport):
+    result = await server.create_task.fn(title="T", due_date="2026-02-31")
+    assert "error" in result and "YYYY-MM-DD" in result["error"]
+    assert transport.requests == []
+
+
+async def test_create_task_rejects_empty_title_and_strips(init_server, transport):
+    result = await server.create_task.fn(title="   ")
+    assert "error" in result
+    assert transport.requests == []
+    await server.create_task.fn(title="  Real title  ")
+    assert transport.last_json()["title"] == "Real title"
+
+
+async def test_create_task_day_rejects_unassigned_and_bad_format(init_server, transport):
+    for bad in ("unassigned", "31-12-2026", "2026-13-01"):
+        result = await server.create_task.fn(title="T", day=bad)
+        assert "error" in result, bad
+    assert transport.requests == []
+    await server.create_task.fn(title="T", day="today")
+    assert transport.last_json()["day"]
+
+
+async def test_update_task_validates_dates_but_allows_clearing(init_server, transport):
+    result = await server.update_task.fn(item_id="t1", start_date="0025-11-24")
+    assert "error" in result
+    result = await server.update_task.fn(item_id="t1", day="2026-02-31")
+    assert "error" in result
+    assert transport.requests == []
+    await server.update_task.fn(item_id="t1", day="unassigned", due_date="", review_date="")
+    setters = {s["key"]: s["val"] for s in transport.last_json()["setters"]}
+    assert setters["day"] == "unassigned"
+    assert setters["dueDate"] is None and setters["reviewDate"] is None
+
+
+async def test_update_category_or_project_validates_first_scheduled_and_title(init_server, transport):
+    result = await server.update_category_or_project.fn(item_id="p1", first_scheduled="2026-9-1")
+    assert "error" in result
+    result = await server.update_category_or_project.fn(item_id="p1", title="")
+    assert "error" in result
+    assert transport.requests == []
+
+
+async def test_create_category_or_project_validates_dates(init_server, transport):
+    result = await server.create_category_or_project.fn(
+        title="P", kind="project", parent_id="cat1", due_date="31/12/2026"
+    )
+    assert "error" in result
+    result = await server.create_category_or_project.fn(
+        title="K", kind="category", review_date="2026-02-30"
+    )
+    assert "error" in result
+    assert transport.requests == []
+
+
+# ---- Low priority (isStarred -1) and get_done_items (undocumented
+# /doneItems, live-tested 2026-08-30).
+
+
+async def test_set_priority_minus_one_is_low_priority(init_server, transport):
+    await server.set_priority.fn(item_id="t1", priority=-1)
+    setters = {s["key"]: s["val"] for s in transport.last_json()["setters"]}
+    assert setters["isStarred"] == -1
+
+
+async def test_create_task_accepts_low_priority_but_not_zero(init_server, transport):
+    result = await server.create_task.fn(title="x", priority=-1)
+    assert "error" not in result
+    assert transport.last_json()["isStarred"] == -1
+    result = await server.create_task.fn(title="x", priority=0)
+    assert "error" in result
+    assert len(transport.requests) == 1  # no call for the invalid case
+
+
+async def test_get_done_items_fans_out_and_filters_on_done_at(settings):
+    from datetime import datetime, timedelta
+    from marvin_mcp.config import TIMEZONE
+    from tests.conftest import RecordingTransport
+
+    target = "2026-08-30"
+    start = datetime(2026, 8, 30, tzinfo=TIMEZONE)
+    ms = lambda dt: int(dt.timestamp() * 1000)
+    by_day = {
+        # scheduled today, done today -> included
+        "2026-08-30": [{"_id": "a", "done": True, "doneAt": ms(start + timedelta(hours=9))}],
+        # scheduled yesterday: one done today (in), one done yesterday (out), one without doneAt (counted)
+        "2026-08-29": [
+            {"_id": "b", "done": True, "doneAt": ms(start + timedelta(hours=23, minutes=59))},
+            {"_id": "c", "done": True, "doneAt": ms(start - timedelta(minutes=1))},
+            {"_id": "d", "done": True},
+        ],
+        # duplicate of a under another date must not be duplicated
+        "2026-08-28": [{"_id": "a", "done": True, "doneAt": ms(start + timedelta(hours=9))}],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/doneItems"
+        assert "X-API-Token" in request.headers  # the limited token is sufficient
+        return httpx.Response(200, json=by_day.get(request.url.params["date"], []))
+
+    server.init(settings, transport=RecordingTransport(handler=handler))
+    result = await server.get_done_items.fn(date=target, lookback_days=2)
+    assert result["count"] == 2
+    assert [i["_id"] for i in result["items"]] == ["a", "b"]
+    assert result["skipped_without_done_at"] == 1
+    assert result["lookback_days"] == 2
+
+
+async def test_get_done_items_rejects_bad_date_without_api_call(init_server, transport):
+    result = await server.get_done_items.fn(date="2026-9-1")
+    assert "error" in result
+    assert transport.requests == []
+
+
+# ---- Cache, coverage declaration, partial result on 429.
+
+
+def _done_handler(by_day, fail_dates=()):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/doneItems"
+        d = request.url.params["date"]
+        if d in fail_dates:
+            return httpx.Response(429, text="Too many AM API requests", headers={"Retry-After": "1"})
+        return httpx.Response(200, json=by_day.get(d, []))
+    return handler
+
+
+async def test_get_done_items_reports_coverage_and_caches(settings):
+    from tests.conftest import RecordingTransport
+    from marvin_mcp.config import TIMEZONE
+    from datetime import datetime
+    done_at = int(datetime(2026, 8, 30, 9, tzinfo=TIMEZONE).timestamp() * 1000)
+    transport = RecordingTransport(handler=_done_handler({"2026-08-30": [{"_id": "a", "done": True, "doneAt": done_at}]}))
+    server.init(settings, transport=transport)
+    r1 = await server.get_done_items.fn(date="2026-08-30", lookback_days=3)
+    assert r1["covers_from"] == "2026-08-27" and r1["days_fetched"] == 4
+    assert "incomplete" not in r1 and "cached" not in r1
+    n = len(transport.requests)
+    r2 = await server.get_done_items.fn(date="2026-08-30", lookback_days=3)
+    assert r2["cached"] is True and r2["count"] == 1
+    assert len(transport.requests) == n  # no new calls
+
+
+async def test_get_done_items_partial_on_429_and_not_cached(settings):
+    from tests.conftest import RecordingTransport
+    from marvin_mcp.config import TIMEZONE
+    from datetime import datetime
+    done_at = int(datetime(2026, 8, 30, 9, tzinfo=TIMEZONE).timestamp() * 1000)
+    transport = RecordingTransport(handler=_done_handler(
+        {"2026-08-30": [{"_id": "a", "done": True, "doneAt": done_at}]}, fail_dates={"2026-08-28"}))
+    server.init(settings, transport=transport)
+    r = await server.get_done_items.fn(date="2026-08-30", lookback_days=3)
+    assert r["count"] == 1 and r["incomplete"] is True
+    assert r["days_fetched"] == 2
+    assert r["days_missing"] == ["2026-08-28", "2026-08-27"]  # stops after the 429
+    assert "429" in r["warning"]
+    assert server.get_client().limiter.cooldown_remaining > 0
+    n = len(transport.requests)
+    r2 = await server.get_done_items.fn(date="2026-08-30", lookback_days=3)
+    assert r2["incomplete"] is True and r2["days_fetched"] == 0  # cool-down: no calls at all
+    assert len(transport.requests) == n
+    assert "cached" not in r2
+
+
+async def test_mark_done_adds_task_to_warm_done_cache(settings):
+    from tests.conftest import RecordingTransport
+    from marvin_mcp.config import TIMEZONE
+    from datetime import datetime
+    done_at = int(datetime(2026, 8, 30, 12, tzinfo=TIMEZONE).timestamp() * 1000)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/markDone":
+            return httpx.Response(200, json={"_id": "t9", "done": True, "doneAt": done_at, "title": "x"})
+        return httpx.Response(200, json=[])
+    server.init(settings, transport=RecordingTransport(handler=handler))
+    r1 = await server.get_done_items.fn(date="2026-08-30", lookback_days=0)
+    assert r1["count"] == 0
+    await server.mark_done.fn(item_id="t9")
+    r2 = await server.get_done_items.fn(date="2026-08-30", lookback_days=0)
+    assert r2["cached"] is True and r2["count"] == 1 and r2["items"][0]["_id"] == "t9"

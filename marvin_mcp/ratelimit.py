@@ -28,6 +28,11 @@ READ_INTERVAL_S = 3.1  # "1 query / 3 s", with margin
 WRITE_INTERVAL_S = 1.1  # "1 create / 1 s", with margin
 DAILY_LIMIT = 1440
 MAX_QUEUE_WAIT_S = 120.0
+# Marvin enforces the daily average (1440/day = "1 per minute") in a shorter,
+# undocumented window as well: a 429 was observed 2026-08-30 after ~100 calls
+# within one hour despite 3 s spacing. After a 429 ALL calls pause for this
+# long (or Retry-After if the server sends a longer value).
+COOLDOWN_S = 60.0
 
 
 class DailyBudgetExceeded(Exception):
@@ -42,6 +47,7 @@ class RateLimiter:
     def __init__(self, state_file: Path | None = None) -> None:
         self._lock = asyncio.Lock()
         self._next_allowed_at = 0.0  # monotonic
+        self._cooldown_until = 0.0  # monotonic
         self._state_file = state_file
         self._count_date = self._today()
         self._count = 0
@@ -89,6 +95,20 @@ class RateLimiter:
         if self._today() != self._count_date:
             return 0
         return self._count
+
+    def note_429(self, retry_after_s: float | None = None) -> float:
+        """The server responded 429: pause all calls for COOLDOWN_S (or
+        Retry-After if longer). Returns the pause length."""
+        secs = max(COOLDOWN_S, retry_after_s or 0.0)
+        until = time.monotonic() + secs
+        self._cooldown_until = max(self._cooldown_until, until)
+        self._next_allowed_at = max(self._next_allowed_at, self._cooldown_until)
+        return secs
+
+    @property
+    def cooldown_remaining(self) -> float:
+        """Seconds left of a 429 pause (0 when none is active)."""
+        return max(0.0, self._cooldown_until - time.monotonic())
 
     async def acquire(self, *, is_write: bool) -> None:
         """Waits until the next call is allowed. Raises DailyBudgetExceeded
