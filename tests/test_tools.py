@@ -745,3 +745,25 @@ async def test_mark_done_adds_task_to_warm_done_cache(settings):
     await server.mark_done.fn(item_id="t9")
     r2 = await server.get_done_items.fn(date="2026-08-30", lookback_days=0)
     assert r2["cached"] is True and r2["count"] == 1 and r2["items"][0]["_id"] == "t9"
+
+
+async def test_delete_task_and_unmark_done_remove_from_warm_done_cache(settings):
+    from tests.conftest import RecordingTransport
+    from marvin_mcp.config import TIMEZONE
+    from datetime import datetime
+    done_at = int(datetime(2026, 8, 30, 12, tzinfo=TIMEZONE).timestamp() * 1000)
+    items = [{"_id": "a", "done": True, "doneAt": done_at}, {"_id": "b", "done": True, "doneAt": done_at + 1}]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/doneItems":
+            return httpx.Response(200, json=items if request.url.params["date"] == "2026-08-30" else [])
+        return httpx.Response(200, json={"ok": True})
+    server.init(settings, transport=RecordingTransport(handler=handler))
+    r1 = await server.get_done_items.fn(date="2026-08-30", lookback_days=0)
+    assert r1["count"] == 2
+    await server.delete_task.fn(item_id="a")
+    r2 = await server.get_done_items.fn(date="2026-08-30", lookback_days=0)
+    assert r2["cached"] is True and [i["_id"] for i in r2["items"]] == ["b"] and r2["count"] == 1
+    await server.unmark_done.fn(item_id="b")
+    r3 = await server.get_done_items.fn(date="2026-08-30", lookback_days=0)
+    assert r3["cached"] is True and r3["count"] == 0

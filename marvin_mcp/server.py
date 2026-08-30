@@ -86,6 +86,19 @@ def remember_done(doc: Any) -> None:
         result["count"] = len(items)
 
 
+def forget_done(item_id: str) -> None:
+    """The inverse of remember_done: drop a task from every warm
+    get_done_items cache (after delete_task/unmark_done), so a deleted or
+    un-completed task does not linger in the completed list for up to
+    30 minutes."""
+    for _key, (_expires, result) in _done_cache.items():
+        items = result["items"]
+        kept = [i for i in items if i.get("_id") != item_id]
+        if len(kept) != len(items):
+            items[:] = kept
+            result["count"] = len(items)
+
+
 def now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -380,6 +393,7 @@ async def unmark_done(
         result = await get_client().update_doc(
             item_id, make_setters({"done": False, "doneAt": None})
         )
+        forget_done(item_id)
         return {"updated": result}
     except Exception as e:
         return tool_error(e)
@@ -590,7 +604,9 @@ async def delete_task(
     a recurring task here (risk of the whole series disappearing without the
     app's cleanup logic) — remove the recurrence in the Marvin app instead."""
     try:
-        return {"deleted": await get_client().delete_doc(item_id)}
+        result = await get_client().delete_doc(item_id)
+        forget_done(item_id)
+        return {"deleted": result}
     except Exception as e:
         return tool_error(e)
 
@@ -654,7 +670,8 @@ async def get_done_items(
     date's own completions are always included because it is fetched
     first. Complete results are cached for 30 minutes (cached=true) —
     repeated calls then cost no API calls; mark_done inserts its task into
-    the cache. Not covered: a task with a FUTURE day completed via the API
+    the cache, delete_task and unmark_done remove theirs. Completions or
+    deletions made in the app show up only once the cache expires. Not covered: a task with a FUTURE day completed via the API
     (it sits under its day). Tasks only — completed projects are not
     listed. Items without doneAt (older data) are excluded and counted in
     skipped_without_done_at. Sorted by doneAt. Cost: one read call per day
