@@ -496,17 +496,33 @@ def test_update_category_or_project_annotations():
     assert server.update_category_or_project.annotations.idempotentHint is True
 
 
-async def test_convert_project_to_category_nulls_and_returns_fields(init_server, transport):
-    """Conversion is an in-place type change (verified live 2026-08-29).
-    →category clears the project-only fields + the firstScheduled leftover
-    and returns the previous values."""
+async def test_convert_project_to_category_lossless_by_default(init_server, transport):
+    """Lossless default since 1.5.0 (the app's correct path, round trip
+    verified 2026-08-30): only type changes, no fields are cleared."""
+    transport.responses["/doc"] = httpx.Response(200, json={
+        "_id": "p1", "db": "Categories", "type": "project",
+        "day": "2026-09-02", "dueDate": "2026-09-20", "priority": "high",
+        "isFrogged": 2, "firstScheduled": "2026-09-02",
+    })
+    result = await server.convert_category_or_project.fn(item_id="p1", to="category")
+    assert result["converted_to"] == "category"
+    assert "removed_project_fields" not in result
+    setters = {s["key"]: s["val"] for s in transport.last_json()["setters"]}
+    field_keys = {k for k in setters if not k.startswith("fieldUpdates.") and k != "updatedAt"}
+    assert field_keys == {"type"}
+
+
+async def test_convert_clear_project_fields_opt_in(init_server, transport):
+    """clear_project_fields=True mimics the app's Edit Settings path: clears
+    the project fields + firstScheduled and returns the previous values."""
     transport.responses["/doc"] = httpx.Response(200, json={
         "_id": "p1", "db": "Categories", "type": "project",
         "day": "2026-09-02", "dueDate": "2026-09-20", "priority": "high",
         "isFrogged": 2, "firstScheduled": "2026-09-02", "startDate": "2026-09-01",
     })
-    result = await server.convert_category_or_project.fn(item_id="p1", to="category")
-    assert result["converted_to"] == "category"
+    result = await server.convert_category_or_project.fn(
+        item_id="p1", to="category", clear_project_fields=True
+    )
     assert result["removed_project_fields"] == {
         "day": "2026-09-02", "dueDate": "2026-09-20", "priority": "high",
         "isFrogged": 2, "firstScheduled": "2026-09-02",

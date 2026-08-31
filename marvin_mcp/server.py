@@ -223,7 +223,7 @@ async def create_task(
     title: Annotated[str, Field(description="Task title")],
     parent_id: Annotated[
         str | None,
-        Field(description="ID of the category/project the task belongs in (from get_categories). Omit for the Inbox. NOTE: the server does not validate the ID — a wrong parentId yields an orphan reachable only via date reads (live-tested 2026-08-29)"),
+        Field(description="ID of the category/project the task belongs in (from get_categories). Omit for the Inbox. NOTE: the server does not validate the ID — a wrong parentId yields an orphan reachable only via date reads (live-tested 2026-08-29); repaired by running FIX_CYCLES() in the app's console"),
     ] = None,
     day: Annotated[
         str | None,
@@ -403,7 +403,7 @@ async def unmark_done(
 async def update_task(
     item_id: Annotated[str, Field(description="Task ID")],
     title: Annotated[str | None, Field(description="New title")] = None,
-    parent_id: Annotated[str | None, Field(description="Move to category/project ID (not validated by the server — a wrong ID yields an orphan, live-tested 2026-08-29)")] = None,
+    parent_id: Annotated[str | None, Field(description="Move to category/project ID (not validated by the server — a wrong ID yields an orphan, live-tested 2026-08-29; repaired by running FIX_CYCLES() in the app's console)")] = None,
     day: Annotated[
         str | None,
         Field(description="Schedule on YYYY-MM-DD, 'today', or 'unassigned' to unschedule"),
@@ -599,7 +599,9 @@ async def delete_task(
     item_id: Annotated[str, Field(description="ID of the document to delete")],
 ) -> dict:
     """Delete a task/document PERMANENTLY via /doc/delete (Full Access Token).
-    Marvin's trash is client-side — this CANNOT be undone. Only use when the
+    Marvin's trash is client-side — an API deletion bypasses it and
+    CANNOT be undone (deleting in the app instead puts the item in the
+    trash, where it can be restored — prefer the app when undo matters). Only use when the
     user explicitly wants a deletion. Never delete the generator document of
     a recurring task here (risk of the whole series disappearing without the
     app's cleanup logic) — remove the recurrence in the Marvin app instead."""
@@ -751,7 +753,8 @@ async def get_children(
     children only — call again for deeper levels. Note: orphans (tasks whose
     parentId points to a deleted/non-existent document) do NOT show up under
     'unassigned' — only in get_today_items/get_due_items if they have a
-    day/dueDate (live-tested 2026-08-29)."""
+    day/dueDate (live-tested 2026-08-29). Orphans are repaired by running
+    FIX_CYCLES() in the app's console (a documented troubleshooting path)."""
     try:
         items = await get_client().children(parent_id)
         return {"parent_id": parent_id, "count": len(items), "items": items}
@@ -1100,6 +1103,10 @@ async def convert_category_or_project(
     to: Annotated[
         Literal["category", "project"], Field(description="Target type to convert to")
     ],
+    clear_project_fields: Annotated[
+        bool,
+        Field(description="Only for to='category': True = clear day / dueDate / priority / isFrogged / firstScheduled (like the app's buggy Edit Settings path — yields a CLEAN category without e.g. a deadline badge, for a permanent conversion); the previous values are then returned in removed_project_fields. Default False = lossless, like the app's correct path"),
+    ] = False,
 ) -> dict:
     """EXPERIMENTAL: Convert project→category or category→project IN PLACE
     via /doc/update (Full Access Token; there is no official conversion
@@ -1108,12 +1115,21 @@ async def convert_category_or_project(
     pure type change (verified against the live API 2026-08-29: the server
     accepts and persists the change in both directions, and the app renders
     correctly after an API-set change).
-    When converting to a category, the project-only fields
-    day/dueDate/priority/isFrogged are cleared (same as the app's 'Turn into
-    Category') plus firstScheduled (a leftover the app's variant leaves
-    behind); the previous values are returned in removed_project_fields so
-    they can be restored with update_category_or_project after a possible
-    back-conversion.
+    LOSSLESS BY DEFAULT (since 1.5.0): only type is changed — the same
+    semantics as the app's correct conversion path (the right-click/hover
+    menu, verified as a lossless round trip 2026-08-30: all project fields
+    incl. firstScheduled preserved through project→category→project).
+    Project fields remaining on the category are then intentional round-trip
+    data; the type guard in update_category_or_project only prevents NEW
+    project fields from being written to it.
+    If you want a clean category for a permanent conversion: set
+    clear_project_fields=True (mimics the app's Edit Settings path — a bug
+    in their tracker; also clears firstScheduled, which that path otherwise
+    leaves behind) and receive the values in removed_project_fields.
+    Note: the app's correct path (right-click/hover) is not in the menu by
+    default — it is added via the gear icon directly in the right-click menu
+    → Add action (app-verified 2026-08-31), so unmodified apps only show the
+    buggy path.
     Do NOT convert a category that contains subcategories into a project —
     projects cannot contain categories (risk of orphans/cycles; check
     get_children first)."""
@@ -1131,7 +1147,7 @@ async def convert_category_or_project(
             return {"error": f"The document is already of type '{to}' — nothing to convert."}
         fields: dict[str, Any] = {"type": to}
         removed: dict[str, Any] | None = None
-        if to == "category":
+        if to == "category" and clear_project_fields:
             removed = {
                 k: doc.get(k)
                 for k in ("day", "dueDate", "priority", "isFrogged", "firstScheduled")

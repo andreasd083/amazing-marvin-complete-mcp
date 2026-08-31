@@ -254,12 +254,17 @@ Everything below was verified against the live API (2026-08-19 through
   undocumented passthrough parameters on the update tools.
 - Project↔category conversion happens **in place**: `_id`, `createdAt` and
   the children remain (verified 2026-08-29, both via an app field test and
-  via the API). The app's "Turn into Category" permanently clears
+  via the API). The app has two conversion paths with different behavior
+  (verified 2026-08-30/31): the Edit Settings button permanently clears
   `day`/`dueDate`/`priority`/`isFrogged` and leaves `firstScheduled` behind
-  as a leftover; `convert_category_or_project` does the same via the API
-  but returns the removed values and cleans up the leftover. There is no
-  official conversion endpoint — the tool sets `type` directly, which is
-  undocumented server behavior and marked experimental.
+  (a bug in Marvin's tracker), while the right-click/hover path is a
+  lossless round trip — but that button is not in the menu by default (add
+  it via the gear icon in the right-click menu → Add action).
+  `convert_category_or_project` is lossless by default since 1.5.0; pass
+  `clear_project_fields=True` for a clean category (the previous values are
+  returned in `removed_project_fields`). There is no official conversion
+  endpoint — the tool sets `type` directly, which is undocumented server
+  behavior and marked experimental.
 - `/doc/create` does not echo back a server-generated `_id` — supply your
   own if you need to reference the document afterwards.
 - Deletion via `/doc/delete` is permanent; Marvin's trash is client-side.
