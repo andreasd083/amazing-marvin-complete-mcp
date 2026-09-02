@@ -247,8 +247,10 @@ Everything below was verified against the live API (2026-08-19 through
 - Read endpoints (`/todayItems`, `/dueItems`) are pure date filters:
   backburner, startDate and orphan status (dead parentId) do not affect
   them — and orphans never show up under `unassigned` (live-tested
-  2026-08-29). `/markDone` stops running time tracking (receipt in
-  `/tracks`) but does not write `task.times`.
+  2026-08-29). `/markDone` stops running time tracking and now also
+  writes `task.times` (live-tested 2026-09-02; it did not on 2026-08-29 —
+  server behavior changed). A direct `/track STOP` still does not write
+  `times`; there `/tracks` is the only record.
 - `orbit`/`noAutoOrbit` are missing from the wiki's data types but present
   in live data (bool, verified 2026-08-29) — exposed as explicitly
   undocumented passthrough parameters on the update tools.

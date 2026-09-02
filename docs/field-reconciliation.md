@@ -83,9 +83,11 @@ write) — documented in the descriptions as an orphan risk.
   they have `day`/`dueDate`, but NOT under `/children?parentId=unassigned`
   — without a date they are unreachable via the API.
 - **`/markDone` stops time tracking** (receipt in `/tracks`, 2 entries)
-  but does NOT write `task.times` — `/tracks` is the only source of truth,
-  even after completion (the wiki's "updated when marked done" applies to
-  the client).
+  and now writes `task.times` (live-tested 2026-09-02, two runs — on
+  2026-08-29 the field was NOT written; the server behavior has changed).
+  A direct `/track STOP` still does not write `times` — there `/tracks`
+  is the only source of truth, in line with the wiki's NOTE about caller
+  responsibility. `duration` not checked.
 - **`/markDone` error codes:** already done => 400; missing ID => **404**
   (unlike `/doc/update` => 500 and `/doc/delete` => 200 — three different
   answers to the same error).

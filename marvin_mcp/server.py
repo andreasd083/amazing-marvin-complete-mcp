@@ -363,8 +363,11 @@ async def mark_done(
     Error codes (live-tested 2026-08-29): 404 = the task does not exist
     (deleted/wrong ID — unlike /doc/update, which responds 500);
     400 = already marked done (harmless, nothing changes). Stops running
-    time tracking on the task (receipt in /tracks; task.times is NOT
-    written by the server). Pinned task: the original stays open and
+    time tracking on the task and writes the tracking interval to
+    task.times (receipt also in /tracks; live-tested 2026-09-02 in two
+    runs — on 2026-08-29 times was NOT written, the server behavior has
+    changed; a direct /track STOP still does not write times, see
+    stop_tracking). Pinned task: the original stays open and
     pinned as documented; the completed copy gets its own ID and can be
     found via get_done_items. Leaves `day` untouched; the app sets day =
     today only on unscheduled and future-dated tasks, a past day is kept
@@ -1307,9 +1310,11 @@ async def start_tracking(
 async def stop_tracking(
     task_id: Annotated[str, Field(description="Task ID")],
 ) -> dict:
-    """Stop time tracking for a task. Note (documented API limitation): the
-    task's own times/duration fields are not updated automatically by the
-    API."""
+    """Stop time tracking for a task. Note (documented API limitation,
+    confirmed live 2026-09-02): the task's own times/duration fields are
+    not updated by /track STOP — the tracking only lands in /tracks
+    (get_time_tracks). Exception: mark_done during active tracking now
+    writes task.times (see mark_done)."""
     try:
         return {"tracking": await get_client().track(task_id, "STOP")}
     except Exception as e:
