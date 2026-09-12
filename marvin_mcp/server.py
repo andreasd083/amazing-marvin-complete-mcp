@@ -227,7 +227,7 @@ async def create_task(
     ] = None,
     day: Annotated[
         str | None,
-        Field(description="Schedule on date YYYY-MM-DD, or 'today'. Omit for unscheduled."),
+        Field(description="Schedule on date YYYY-MM-DD, 'today', or 'unassigned' (= unscheduled, same as omitting). Same rules as update_task."),
     ] = None,
     priority: Annotated[
         int | None,
@@ -294,7 +294,15 @@ async def create_task(
 
     Note: startDate/endDate CANNOT be set here — /addTask ignores them
     (verified against the live API 2026-08-29). Set them with update_task
-    after creation. Strategy-dependent fields (planned_week/month,
+    after creation.
+    A clock time (Time/taskTime) on the task: fully possible in Marvin, but
+    it is set in the APP, not via this MCP — an MCP limitation, NOT a Marvin
+    limitation. A set Time automatically becomes (with auto-created
+    reminders enabled in the user's settings) a reminder at that time; the
+    task does NOT become an event and blocks no time (time blocking = time
+    blocks). The reason for the app route is the double-write sync — see
+    set_reminder.
+    Strategy-dependent fields (planned_week/month,
     review_date, backburner, is_reward/reward_points, the sections) are
     stored even when the strategy is disabled in the app — they just are
     not shown in the UI then."""
@@ -303,7 +311,7 @@ async def create_task(
         if parent_id:
             data["parentId"] = parent_id
         if day:
-            check_day(day, allow_unassigned=False)
+            check_day(day)
             data["day"] = local_today() if day == "today" else day
         if priority is not None:
             if priority == 0:
@@ -429,7 +437,7 @@ async def update_task(
     ] = None,
     planned_week: Annotated[
         str | None,
-        Field(description="Plan into a week: the week's Monday YYYY-MM-DD (Planning Ahead strategy; verified in the app 2026-08-29 — also shows in the month view), '' removes (client cache may linger until a view switch)"),
+        Field(description="Plan into a week: the week's Monday YYYY-MM-DD (Planning Ahead strategy; verified in the app 2026-08-29 — also shows in the month view), '' removes. The app's view: clearing propagates server-side, but with Planning Ahead on (2026-08-29) the task stayed in the month view even after switching views — ask the user to reload the client (F5 in the web app/PWA, restart of the desktop app) before a missing render is taken for an error"),
     ] = None,
     planned_month: Annotated[
         str | None, Field(description="Plan into a month: YYYY-MM (Planning Ahead strategy, verified in the app 2026-08-29), '' removes")
@@ -483,6 +491,10 @@ async def update_task(
     Strategy-dependent fields (start/end date, planned_week/month,
     review_date, backburner, orbit, the sections) can be set even when the
     strategy is disabled in the app — they just are not shown in the UI then.
+    A clock time (Time/taskTime) and the task's reminder fields are set in
+    the APP, not here — an MCP limitation (double-write sync, see
+    set_reminder), NOT a Marvin limitation: Marvin fully supports times on
+    tasks.
     Note on recurring tasks: never edit recurrence rules here — neither on a
     generated instance (recurring=true, _id 'YYYY-MM-DD_<id>') nor on the
     generator document. Do that editing in the Marvin app. Simple field
@@ -607,7 +619,21 @@ async def delete_task(
     trash, where it can be restored — prefer the app when undo matters). Only use when the
     user explicitly wants a deletion. Never delete the generator document of
     a recurring task here (risk of the whole series disappearing without the
-    app's cleanup logic) — remove the recurrence in the Marvin app instead."""
+    app's cleanup logic) — remove the recurrence in the Marvin app instead.
+    THE APP'S VIEW (live-tested 2026-09-12, PWA + Windows desktop app
+    1.70.0): an API deletion is NOT rendered in an open Marvin client —
+    neither waiting nor switching views helps. First confirm the server
+    with get_children on the parent (the task should be missing), then ask
+    the user to reload the client BEFORE the row is touched in the app: F5
+    in the web app/PWA, restart of the desktop app. Editing the stale row in
+    the app can RECREATE the document via the client's conflict resolution
+    (observed once, 2026-09-12, in one of the two clients — which one is
+    not recorded: row still shown after the deletion, unscheduled with the
+    x button in the app, document back on a new _rev 84-97 s after the
+    deletion; reported upstream). If the user has the app
+    open: suggest deleting IN THE APP first (goes to the trash, no conflict
+    with the app's own copy); API deletion when the user explicitly wants
+    it, and then with the reload rule above."""
     try:
         result = await get_client().delete_doc(item_id)
         forget_done(item_id)
@@ -622,13 +648,17 @@ async def delete_task(
 @mcp.tool(annotations=READONLY)
 async def get_today_items(
     date: Annotated[
-        str | None, Field(description="Date YYYY-MM-DD; omit for today (server timezone)")
+        str | None, Field(description="Date YYYY-MM-DD; returns everything open with day <= the date; omit for today (MARVIN_TIMEZONE, else the system timezone)")
     ] = None,
 ) -> dict:
-    """Get tasks/projects scheduled on a given date (default today, in the
-    server's configured timezone). Note: today's recurring tasks may be
-    missing if the Marvin app hasn't been running yet today (instances are
-    generated by the client)."""
+    """Get open tasks/projects with `day` <= the date (default today in
+    MARVIN_TIMEZONE, or the system's local timezone when unset) — i.e.
+    also items scheduled earlier than the date, not only those on exactly
+    that day. Tasks that only have a deadline are not included; fetch them
+    with get_due_items. Observed 2026-09-11 with rollover enabled in the
+    account; items with a clock time are untested.
+    Note: today's recurring tasks may be missing if the Marvin app hasn't
+    been running yet today (instances are generated by the client)."""
     try:
         items = await get_client().today_items(date)
         return {"date": date or local_today(), "count": len(items), "items": items}
@@ -809,10 +839,10 @@ async def create_category_or_project(
     ] = None,
     day: Annotated[
         str | None,
-        Field(description="Projects ONLY: schedule on YYYY-MM-DD or 'today' (categories cannot be scheduled)"),
+        Field(description="Projects ONLY: schedule on YYYY-MM-DD or 'today' (blocked for categories — a category is never completed)"),
     ] = None,
     due_date: Annotated[
-        str | None, Field(description="Projects ONLY: deadline YYYY-MM-DD (categories have no dueDate)")
+        str | None, Field(description="Projects ONLY: deadline YYYY-MM-DD (blocked for categories — a category is never completed)")
     ] = None,
     priority: Annotated[
         Literal["high", "mid", "low"] | None,
@@ -823,13 +853,19 @@ async def create_category_or_project(
         Field(description="Projects ONLY: frog marker 1=normal, 2=baby, 3=monster", ge=1, le=3),
     ] = None,
     label_ids: Annotated[
-        list[str] | None, Field(description="Projects ONLY: label IDs (from get_labels)")
+        list[str] | None, Field(description="Label IDs (from get_labels) — categories AND projects: categories have labels, stored in the same field as projects' and rendered in the app (live-tested + verified in the app 2026-09-11)")
     ] = None,
 ) -> dict:
     """Create a category (via /doc/create, Full Access Token) or a project
     (via /addProject). Categories can contain categories; projects cannot.
-    Categories have no day/dueDate/priority/frog/labels in the data model —
-    those parameters are rejected for kind='category'. startDate/endDate
+    day/due_date/priority/frog are rejected for kind='category' for a
+    structural reason, not a technical one: a category can never be
+    completed or checked off, and deadline, scheduling, priority and frog
+    belong to things that can be finished — projects and tasks. The API
+    accepts the fields on categories (live-tested 2026-09-11) but they are
+    not meaningful there (rule 2026-09-11). label_ids applies to both
+    categories and projects.
+    startDate/endDate
     cannot be set at creation (/addProject ignores them, verified live
     2026-08-29) — use update_category_or_project afterwards.
 
@@ -843,15 +879,16 @@ async def create_category_or_project(
         if kind == "category":
             rejected = {
                 "day": day, "due_date": due_date, "priority": priority,
-                "frog": frog, "label_ids": label_ids,
+                "frog": frog,
             }
             given = [name for name, val in rejected.items() if val is not None]
             if given:
                 return {
                     "error": (
                         f"The parameters {', '.join(given)} apply to projects only — "
-                        "categories cannot be scheduled, prioritized or labeled "
-                        "according to Marvin's data model."
+                        "a category is never completed, so deadline, scheduling, "
+                        "priority and frog belong to projects and tasks "
+                        "(structural rule 2026-09-11). Labels are fine on categories."
                     )
                 }
         if kind == "project":
@@ -904,6 +941,8 @@ async def create_category_or_project(
         }
         if note:
             doc["note"] = note
+        if label_ids:
+            doc["labelIds"] = label_ids
         if color:
             doc["color"] = color
         if icon:
@@ -949,10 +988,10 @@ async def update_category_or_project(
     ] = None,
     planned_week: Annotated[
         str | None,
-        Field(description="Plan into a week: the week's Monday YYYY-MM-DD (Planning Ahead strategy), '' removes"),
+        Field(description="Plan into a week: the week's Monday YYYY-MM-DD (Planning Ahead strategy), '' removes (the app's view may keep showing it until the client is reloaded — see update_task.planned_week)"),
     ] = None,
     planned_month: Annotated[
-        str | None, Field(description="Plan into a month: YYYY-MM (Planning Ahead strategy), '' removes")
+        str | None, Field(description="Plan into a month: YYYY-MM (Planning Ahead strategy), '' removes (the app's view may keep showing it until the client is reloaded — see update_task.planned_week)")
     ] = None,
     review_date: Annotated[
         str | None, Field(description="Review date YYYY-MM-DD (Review Date strategy), '' removes")
@@ -978,7 +1017,7 @@ async def update_category_or_project(
     ] = None,
     label_ids: Annotated[
         list[str] | None,
-        Field(description="Projects ONLY: new labels (replaces existing ones, [] removes all)"),
+        Field(description="New labels (replaces existing ones, [] removes all) — categories AND projects: categories have labels in the same field as projects, stored and rendered (live-tested + verified in the app 2026-09-11)"),
     ] = None,
     backburner: Annotated[
         bool | None,
@@ -995,11 +1034,16 @@ async def update_category_or_project(
 ) -> dict:
     """Update fields on an existing CATEGORY or PROJECT via /doc/update
     (Full Access Token). For tasks, use update_task. Fields marked
-    'Projects ONLY' do not exist in the category data model — if any of
-    them is given, the tool first reads the document (1 extra API call) and
-    refuses if it is a category: project fields on a category make it
-    unrepairable from the app's UI (verified in the app 2026-08-29; repair
-    then requires /doc/update with null). Strategy-dependent fields
+    'Projects ONLY' (day/due_date/priority/frog) are blocked for
+    categories: if any of them is given, the tool first reads the document
+    (1 extra API call) and refuses if it is a category. The reason is
+    structural, not technical: a category can never be completed or
+    checked off, and deadline, scheduling, priority and frog belong to
+    things that can be finished — projects and tasks. The API accepts the
+    fields on categories (live-tested 2026-09-11) but they are not
+    meaningful there (rule 2026-09-11). label_ids applies to both
+    categories and projects.
+    Strategy-dependent fields
     (start/end date, planned_week/month, review_date, orbit) can be set
     even when the strategy is disabled in the app. Do not complete projects
     here (done via /doc/update skips the app's side effects) — that is done
@@ -1013,7 +1057,7 @@ async def update_category_or_project(
     try:
         project_only = {
             "day": day, "due_date": due_date, "priority": priority,
-            "frog": frog, "label_ids": label_ids,
+            "frog": frog,
         }
         given = [name for name, val in project_only.items() if val is not None]
         if given:
@@ -1029,9 +1073,10 @@ async def update_category_or_project(
                 return {
                     "error": (
                         f"The parameters {', '.join(given)} apply to projects only — "
-                        "the document is a category. Project fields on a category "
-                        "make it unrepairable from the app's UI (verified "
-                        "2026-08-29), so the write is blocked."
+                        "the document is a category. A category is never "
+                        "completed, so deadline, scheduling, priority and frog "
+                        "belong to projects and tasks (structural rule "
+                        "2026-09-11); the write is blocked. Labels are fine."
                     )
                 }
         fields: dict[str, Any] = {}
@@ -1514,7 +1559,14 @@ async def set_reminder(
     therefore does NOT link the reminder to the task in the app's UI, and
     risks an orphaned/inconsistent server-side entry (only visible through
     get_reminders). Task-linked reminders are set in the Marvin app; use
-    this tool for standalone reminders only."""
+    this tool for standalone reminders only.
+    Facts about time on tasks (live data 2026-09-02): the Time field in the
+    app (taskTime) is a clock time that — with auto-created reminders
+    enabled in the user's settings — automatically becomes a reminder at
+    the same time (reminderTime = the clock time, offset 0); Time and
+    reminder are in practice the same thing there. That this MCP does not
+    set times on tasks is therefore an MCP limitation, never a Marvin
+    limitation."""
     try:
         reminder = {
             "time": time_unix_seconds,

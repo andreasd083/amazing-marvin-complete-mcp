@@ -26,9 +26,24 @@ Orbit view unless `noAutoOrbit` is set.
 - Wiki corrections found: project timeEstimate is NOT aggregated with the
   children's estimates in the UI; snoozed tasks are hidden from the
   category view too (not just 'everywhere except the master list').
-- Project-only fields written onto a category are silently accepted by the
-  server but make the category unrepairable from the app's UI — hence the
-  type-check guard in `update_category_or_project`.
+- Project-only fields (day/dueDate/priority/isFrogged) written onto a
+  category are silently accepted by the server (live-tested 2026-09-11).
+  `update_category_or_project` blocks them anyway (type check since
+  1.2.0); since 1.6.0 the reason given is structural — a category is never
+  completed, so those fields belong to things that can be finished — not
+  "unrepairable from the UI" (the edit panel has a Due Date field on
+  categories too, 2026-09-11). `labelIds` applies to categories as much as
+  to projects.
+- Clearing `plannedWeek`/`plannedMonth` with Planning Ahead on: the task
+  stayed in the month view even after switching views (2026-08-29) — the
+  client must be reloaded.
+- The app's view (2026-09-12, PWA + desktop 1.70.0 side by side):
+  create/update/move render immediately in both; a deletion never renders
+  without a reload — F5 suffices in the PWA, the desktop app needs a
+  restart (no refresh). Side finding: an API-deleted task came back on a
+  new `_rev` after the still-shown row was edited in the app (observed
+  once, in one of the two clients; reported upstream) — see the README bullet "The app's view after
+  API writes".
 
 ## Key findings from the live tests
 
@@ -75,9 +90,16 @@ write) — documented in the descriptions as an orphan risk.
 
 ## Level 3 — interactions/side effects (live-tested 2026-08-29)
 
-- **Read endpoints are pure date filters:** `/todayItems` lists tasks with
-  `day` = the date regardless of `backburner=true` or a future `startDate`
-  — all such hiding is client logic. `day` + `plannedWeek` at the same
+- **Read endpoints are pure date filters:** `/todayItems` lists open tasks
+  with `day` <= the date (earlier-scheduled items included, not only the
+  day itself — live-tested 2026-09-11 with rollover enabled; items with a
+  clock time untested) regardless of `backburner=true` or a future
+  `startDate` — all such hiding is client logic. Completed items drop out
+  immediately (2026-09-11).
+- **`day` = `""`/`null` hides nothing:** `/dueItems` returns open items
+  with a past `dueDate` whether `day` is `"unassigned"`, `""`, `null` or a
+  date; `/addTask` turns `""` into `"unassigned"`, `/doc/update` stores
+  `""` verbatim (2026-09-11). `day` + `plannedWeek` at the same
   time is allowed; `/markDone` leaves `plannedWeek` untouched.
 - **Orphans** (dead `parentId`) show up in `/todayItems`/`/dueItems` if
   they have `day`/`dueDate`, but NOT under `/children?parentId=unassigned`
@@ -147,7 +169,7 @@ write) — documented in the descriptions as an orphan risk.
 | `dueDate` | supported | `create_task`, `update_task` |
 | `startDate` | supported (update only) | `update_task` — `/addTask` ignores the field; the strategy hides BACKBURNER items until their start date, not scheduled tasks (verified in the app 2026-08-29) |
 | `endDate` | supported (update only) | `update_task` — as `startDate` |
-| `plannedWeek` | supported | `create_task`, `update_task` (client-side Monday validation) — correct week in the UI, also shows in the month view; clearing propagates server-side but client cache may linger (verified in the app 2026-08-29) |
+| `plannedWeek` | supported | `create_task`, `update_task` (client-side Monday validation) — correct week in the UI, also shows in the month view; clearing propagates server-side but the app kept showing the task in the month view even after switching views — reload the client (verified in the app 2026-08-29) |
 | `plannedMonth` | supported | `create_task`, `update_task` — correct month in the UI (verified in the app 2026-08-29) |
 | `reviewDate` | supported | `create_task`, `update_task` — Review view + badge verified in the app 2026-08-29; the day-view banner additionally requires the Review Alert workflow snippet |
 | `timeEstimate` | supported | `create_task`, `update_task` (minutes → ms) |
@@ -171,7 +193,7 @@ write) — documented in the descriptions as an orphan risk.
 | `subtasks` | **unsupported** | complex object shape; managed in the app |
 | `rank`, `masterRank`, `dayRank` | **unsupported** | the app's sort bookkeeping — writing risks invisible/mis-sorted views |
 | `firstScheduled` | **unsupported** | the app's bookkeeping for the procrastination counter |
-| `taskTime`, `reminderTime`, `reminderOffset`, `snooze`, `autoSnooze`, `remindAt`, `reminder` | **unsupported** | task reminders require a double write kept in sync with the server-side entry — see the warning in `set_reminder`; set in the app |
+| `taskTime`, `reminderTime`, `reminderOffset`, `snooze`, `autoSnooze`, `remindAt`, `reminder` | **unsupported (MCP choice, not a Marvin gap)** | task reminders require a double write kept in sync with the server-side entry — see the warning in `set_reminder`; set in the app. Facts (live data 2026-09-02): Time = a clock time on the day (`day` remains the only scheduling), creates no event/time block; with auto-created reminders enabled the app writes `reminderTime` = the clock time, `reminderOffset: 0`, snooze per settings + a server-side entry — Time and reminder are in practice the same thing. Reading works fully (the fields travel with the task; `get_reminders` lists the server-side entries) |
 | `isPinned`, `pinId`, `recurring`, `recurringTaskId`, `echo`, `echoId`, `generatedAt`, `echoedAt` | **unsupported** | recurrence/pinning machinery — never edited via the API (see the `update_task` warning) |
 | `calId`, `calURL`, `etag`, `calData` | **unsupported** | calendar-sync internals |
 | `times`, `duration`, `firstTracked` | **unsupported** | time-tracking cache — the source of truth is the `/track` endpoints (`start_tracking` etc.) |
@@ -193,11 +215,11 @@ write) — documented in the descriptions as an orphan risk.
 | `endDate` | supported (update only) | as `startDate` |
 | `plannedWeek`, `plannedMonth` | supported | `create_category_or_project`, `update_category_or_project` |
 | `reviewDate` | supported | `create_category_or_project`, `update_category_or_project` |
-| `day` | supported (projects only) | `create_category_or_project`, `update_category_or_project` — categories cannot be scheduled |
+| `day` | supported (projects only) | `create_category_or_project`, `update_category_or_project` — blocked for categories for a structural reason (a category is never completed; the server accepts the field, live-tested 2026-09-11) |
 | `dueDate` | supported (projects only) | as `day` |
 | `priority` | supported (projects only) | the string field `"high"`/`"mid"`/`"low"` = Most/Very/Important (3/2/1 stars; Level 4) — not `isStarred`, no Low level; `high` renders as a red ring in lists / red star in the panel (verified in the app 2026-08-29) |
 | `isFrogged` | supported (projects only) | `create_category_or_project` (`frog`), `update_category_or_project` |
-| `labelIds` | supported (projects only) | `create_category_or_project`, `update_category_or_project` — categories: the field is not part of the data model and the tools block it; the app attaches labels to categories only through its own Kanban drag flow (observed 2026-08-29: an API-created category could not be given a label any other way) |
+| `labelIds` | supported (categories and projects) | `create_category_or_project`, `update_category_or_project` — categories have labels in the same field as projects: the app's drag-assigned category labels live in `labelIds`, and an API-set label is stored, stays and renders in the app (live-tested + verified in the app 2026-09-11). The block up to 1.5.1 was the tool's, not Marvin's. Exclusive label groups are not enforced server-side — at most one label per exclusive group |
 | `backburner` | supported (update only) | `update_category_or_project` — same condition as Tasks (unscheduled item) |
 | `type` | supported | `convert_category_or_project` (experimental — in-place conversion; no official endpoint) |
 | `orbit`, `noAutoOrbit` | supported (update only) | `update_category_or_project` — undocumented, see Tasks |

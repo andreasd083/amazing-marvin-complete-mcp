@@ -460,9 +460,10 @@ async def test_update_category_or_project_requires_some_field(init_server, trans
 
 
 async def test_update_category_or_project_guards_project_fields_on_category(init_server, transport):
-    """Verified in the app 2026-08-29: project fields on a category make it
-    unrepairable from the app's UI — the tool reads the document type first
-    and blocks the write."""
+    """Structural rule 2026-09-11 (replaces the 2026-08-29 motivation): a
+    category is never completed, so day/due_date/priority/frog are blocked
+    — the tool reads the document type first and refuses. The server
+    accepts the fields (live-tested 2026-09-11); the block is the tool's."""
     transport.responses["/doc"] = httpx.Response(200, json={
         "_id": "c1", "db": "Categories", "type": "category",
     })
@@ -595,13 +596,19 @@ async def test_create_task_rejects_empty_title_and_strips(init_server, transport
     assert transport.last_json()["title"] == "Real title"
 
 
-async def test_create_task_day_rejects_unassigned_and_bad_format(init_server, transport):
-    for bad in ("unassigned", "31-12-2026", "2026-13-01"):
+async def test_create_task_day_same_rules_as_update_task(init_server, transport):
+    # 1.6.0: create_task accepts 'unassigned' and 'today' like update_task;
+    # invalid formats are rejected, '' means "omit".
+    for bad in ("31-12-2026", "2026-13-01", "2026-9-1"):
         result = await server.create_task.fn(title="T", day=bad)
         assert "error" in result, bad
     assert transport.requests == []
     await server.create_task.fn(title="T", day="today")
     assert transport.last_json()["day"]
+    await server.create_task.fn(title="T", day="unassigned")
+    assert transport.last_json()["day"] == "unassigned"
+    await server.create_task.fn(title="T", day="")
+    assert "day" not in transport.last_json()
 
 
 async def test_update_task_validates_dates_but_allows_clearing(init_server, transport):
@@ -783,3 +790,32 @@ async def test_delete_task_and_unmark_done_remove_from_warm_done_cache(settings)
     await server.unmark_done.fn(item_id="b")
     r3 = await server.get_done_items.fn(date="2026-08-30", lookback_days=0)
     assert r3["cached"] is True and r3["count"] == 0
+
+
+async def test_update_category_or_project_label_ids_allowed_on_category(init_server, transport):
+    """Live-tested + verified in the app 2026-09-11: categories have labels
+    in the same field as projects — label_ids goes through without the
+    type check."""
+    await server.update_category_or_project.fn(item_id="c1", label_ids=["l1"])
+    assert len(transport.requests) == 1  # no GET first
+    assert transport.requests[0].url.path.endswith("/doc/update")
+    setters = {s["key"]: s["val"] for s in transport.last_json()["setters"]}
+    assert setters["labelIds"] == ["l1"]
+
+
+async def test_create_category_with_label_ids(init_server, transport):
+    """labelIds travels in /doc/create for categories."""
+    await server.create_category_or_project.fn(
+        title="K", kind="category", parent_id="root", label_ids=["l1"]
+    )
+    body = transport.last_json()
+    assert body["type"] == "category"
+    assert body["labelIds"] == ["l1"]
+
+
+async def test_create_category_still_rejects_project_fields(init_server, transport):
+    result = await server.create_category_or_project.fn(
+        title="K", kind="category", parent_id="root", due_date="2026-09-20"
+    )
+    assert "error" in result and "category" in result["error"]
+    assert transport.requests == []

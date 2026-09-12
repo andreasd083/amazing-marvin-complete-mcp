@@ -205,6 +205,13 @@ Everything below was verified against the live API (2026-08-19 through
   (live-tested 2026-08-29) — they can only be set afterwards via
   `/doc/update` (the update tools). `/addProject` also ignores
   `color`/`icon` (set them via `update_category_or_project`).
+- A clock time on a task (Time/`taskTime`) is set in the app, not via this
+  MCP — a deliberate MCP choice (the double-write sync, see
+  `set_reminder`), NOT a Marvin limitation: Marvin fully supports times on
+  tasks, and with auto-created reminders a set Time automatically becomes
+  a reminder at the same time (live data 2026-09-02). Reading the fields
+  works. The phrasing "you cannot set a time on a task" is therefore wrong
+  about Marvin — it only holds for the MCP write path.
 - Projects are prioritized with the string field `priority`
   (`"high"`/`"mid"`/`"low"`), not `isStarred` like tasks (live-tested
   2026-08-29) — which is why `set_priority` is task-only. Mapping (verified
@@ -247,7 +254,9 @@ Everything below was verified against the live API (2026-08-19 through
 - Read endpoints (`/todayItems`, `/dueItems`) are pure date filters:
   backburner, startDate and orphan status (dead parentId) do not affect
   them — and orphans never show up under `unassigned` (live-tested
-  2026-08-29). `/markDone` stops running time tracking and now also
+  2026-08-29). `/todayItems?date=X` returns all open items with `day` <= X,
+  not just day X (live-tested 2026-09-11, rollover enabled). `/markDone`
+  stops running time tracking and now also
   writes `task.times` (live-tested 2026-09-02; it did not on 2026-08-29 —
   server behavior changed). A direct `/track STOP` still does not write
   `times`; there `/tracks` is the only record.
@@ -270,6 +279,24 @@ Everything below was verified against the live API (2026-08-19 through
 - `/doc/create` does not echo back a server-generated `_id` — supply your
   own if you need to reference the document afterwards.
 - Deletion via `/doc/delete` is permanent; Marvin's trash is client-side.
+- **The app's view after API writes** (live-tested 2026-09-12, PWA +
+  Windows desktop app 1.70.0, both open at the same time): creating,
+  field changes and moves between category/Inbox render immediately with
+  no action needed. **Deletions do not render at all** — neither waiting
+  nor switching views helps. The same held for a cleared
+  `plannedWeek`/`plannedMonth` with Planning Ahead on (2026-08-29) and for
+  strategy toggling (method rule since 2026-08-29). Rule of action:
+  (1) confirm the server with a read (`get_children` on the parent — the
+  task should be missing); (2) if the app still shows the row, that is the
+  app's view, not an error — reload the client *before* the row is touched
+  in the app: **F5 in the web app/PWA**, **restart of the desktop app** (it
+  has no refresh). The reason for "before the row is touched": editing a
+  row in the app whose document is already deleted on the server can
+  recreate the document through the client's conflict resolution
+  (observed once, 2026-09-12, in one of the two clients — which one is
+  not recorded; reported upstream). This is the Marvin
+  client's view — not to be confused with `get_done_items`' own 30-minute
+  cache, which goes the other way (app → MCP).
 
 **Reward points & kudos**
 - Kudos (XP/level, read via `/kudos`) and reward points
@@ -330,9 +357,14 @@ Everything below was verified against the live API (2026-08-19 through
   requires the "Review Alert" workflow snippet.
 - Auto-orbit (if enabled) pulls newly scheduled tasks into Orbit unless
   `noAutoOrbit` is set.
-- Project-only fields written onto a category are silently accepted by the
-  server but make the category unrepairable from the app's UI — which is
-  why `update_category_or_project` type-checks before writing them.
+- Project-only fields (`day`, `dueDate`, `priority`, `isFrogged`) written
+  onto a category are silently accepted by the server (live-tested
+  2026-09-11). `update_category_or_project` still type-checks and blocks
+  them, for a structural reason: a category is never completed, so those
+  fields belong to projects and tasks. `labelIds` is different — categories
+  have labels in the same field as projects, and an API-set label is
+  stored and rendered (live-tested + verified in the app 2026-09-11), so
+  `label_ids` is allowed on categories since 1.6.0.
 
 ## How this differs from existing alternatives
 
