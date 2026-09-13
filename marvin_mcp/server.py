@@ -277,7 +277,7 @@ async def create_task(
     ] = None,
     time_block_section: Annotated[
         str | None,
-        Field(description="Time block ID (from get_today_time_blocks). NOTE: stored, but no visible section link renders in Today even with the Time Block Sections strategy active (verified in the app 2026-08-29) — visible section assignment is done in the app"),
+        Field(description="Time block ID (from get_today_time_blocks, or time_block_id from create_time_block). NOTE: stored, but gives no visible link in Today (verified in the app 2026-08-29, and re-verified 2026-09-13 with app 1.70.0.0, PWA + desktop, Time Blocking on). In the app the link is carried by the block's own mapping to a label/category/smart list (see get_today_time_blocks), and a block shows its tasks only during its own clock time — to make a task appear in a block, give the block a category in the app and put the task there. Reported upstream"),
     ] = None,
 ) -> dict:
     """Create a task in Amazing Marvin. Prefer priority/frog over dates
@@ -466,7 +466,7 @@ async def update_task(
     ] = None,
     time_block_section: Annotated[
         str | None,
-        Field(description="Time block ID (from get_today_time_blocks), '' removes. NOTE: stored, but no visible section link renders in Today even with the strategy active (verified in the app 2026-08-29)"),
+        Field(description="Time block ID (from get_today_time_blocks, or time_block_id from create_time_block), '' removes. NOTE: stored, but gives no visible link in Today (verified in the app 2026-08-29 and 2026-09-13); in the app the link is carried by the block's own label/category/smart-list mapping — see create_task"),
     ] = None,
     snooze_until_unix_ms: Annotated[
         int | None,
@@ -1311,9 +1311,18 @@ async def create_time_block(
 ) -> dict:
     """EXPERIMENTAL: Create a time block via /doc/create (db='PlannerItems',
     Full Access Token). No official endpoint exists. Verify in the app that
-    the block looks right."""
+    the block looks right.
+
+    The response carries `time_block_id` (the id is set client-side because
+    /doc/create does not echo the server-generated id) and can be used
+    directly as time_block_section in create_task/update_task — no extra
+    get_today_time_blocks call needed. Client-set id live-tested 2026-09-13:
+    accepted, listed in /todayTimeBlocks with the same id, and the block
+    renders in the app like one created there (verified in the app
+    2026-09-13, app 1.70.0.0, PWA + desktop)."""
     try:
         doc = {
+            "_id": uuid.uuid4().hex,
             "db": "PlannerItems",
             "title": title,
             "date": date,
@@ -1322,7 +1331,8 @@ async def create_time_block(
             "isSection": True,
             "createdAt": now_ms(),
         }
-        return {"created": await get_client().create_doc(doc)}
+        created = await get_client().create_doc(doc)
+        return {"created": created, "time_block_id": doc["_id"]}
     except Exception as e:
         return tool_error(e)
 

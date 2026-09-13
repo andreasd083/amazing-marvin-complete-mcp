@@ -22,7 +22,9 @@ Orbit view unless `noAutoOrbit` is set.
   (strategy on), project priority/frog/timeEstimate rendering, snooze
   fields, reviewDate, plannedWeek/Month.
 - Stored but not rendered: timeBlockSection (no visible section link in
-  Today), project icons (projects never render an own icon).
+  Today; re-verified 2026-09-13 — the link is carried by the block's own
+  label/category/smart-list mapping), project icons (projects never render
+  an own icon).
 - Wiki corrections found: project timeEstimate is NOT aggregated with the
   children's estimates in the UI; snoozed tasks are hidden from the
   category view too (not just 'everywhere except the master list').
@@ -109,7 +111,10 @@ write) — documented in the descriptions as an orphan risk.
   2026-08-29 the field was NOT written; the server behavior has changed).
   A direct `/track STOP` still does not write `times` — there `/tracks`
   is the only source of truth, in line with the wiki's NOTE about caller
-  responsibility. `duration` not checked.
+  responsibility. `duration` is also set by `/markDone` during active
+  tracking (verified in the app 2026-09-13: 29m15s and 4m29s, `times` =
+  [start, stop]; the app shows the time under Completed Today when Time
+  Tracking is on).
 - **`/markDone` error codes:** already done => 400; missing ID => **404**
   (unlike `/doc/update` => 500 and `/doc/delete` => 200 — three different
   answers to the same error).
@@ -184,10 +189,10 @@ write) — documented in the descriptions as an orphan risk.
 | `dailySection` | supported | `create_task`, `update_task` (dailyStructure strategy) |
 | `bonusSection` | supported | `create_task`, `update_task` (bonusStructure strategy) |
 | `customSection` | supported | `create_task`, `update_task` (customStructure strategy) |
-| `timeBlockSection` | supported (stored but not rendered) | `create_task`, `update_task` — no visible section link in Today even with the strategy active (verified in the app 2026-08-29) |
+| `timeBlockSection` | supported (stored but not rendered) | `create_task`, `update_task` — no visible section link in Today even with the strategy active (verified in the app 2026-08-29, re-verified 2026-09-13 in app 1.70.0.0, PWA + desktop). In the app the link is carried by the block's own label/category/smart-list mapping (`plannerSmartLists`), not by the field. Since 1.7.0 `create_time_block` returns `time_block_id` (client-set `_id`; live-tested 2026-09-13: accepted, listed in `/todayTimeBlocks` with the same id) |
 | `itemSnoozeTime` | supported (update only) | `update_task` (`snooze_until_unix_ms`) — hides from Today AND the category view (verified in the app 2026-08-29; the wiki's 'except the master list' does not hold for the category view) |
 | `permaSnoozeTime` | supported (update only) | `update_task` — `/addTask` ignores the field; hides from Today (verified in the app 2026-08-29) |
-| `orbit`, `noAutoOrbit` | supported (update only) | `update_task` — undocumented in the wiki; orbit=true verified in the app 2026-08-29 (Orbit view + icon in Today). Auto-orbit pulls in scheduled tasks unless noAutoOrbit is set |
+| `orbit`, `noAutoOrbit` | supported (update only) | `update_task` — undocumented in the wiki; orbit=true verified in the app 2026-08-29 (Orbit view + icon in Today). Auto-orbit pulls in scheduled tasks unless noAutoOrbit is set. **`/addTask` silently drops `noAutoOrbit`** (live-tested 2026-09-13: 200, the field is absent from both the echo and the stored document) — hence no create parameter; set it with update_task after creating |
 | `rewardId` | **unsupported** | no tool exposes Reward IDs to point at; set in the app |
 | `dependsOn` | **unsupported** | complex object shape (ID⇒bool) with dependency logic in the app; set in the app |
 | `subtasks` | **unsupported** | complex object shape; managed in the app |

@@ -204,7 +204,9 @@ Everything below was verified against the live API (2026-08-19 through
 - `startDate`/`endDate` are ignored by `/addTask` and `/addProject`
   (live-tested 2026-08-29) — they can only be set afterwards via
   `/doc/update` (the update tools). `/addProject` also ignores
-  `color`/`icon` (set them via `update_category_or_project`).
+  `color`/`icon` (set them via `update_category_or_project`), and
+  `/addTask` silently drops `noAutoOrbit` (live-tested 2026-09-13) — set it
+  with `update_task` after creating the task.
 - A clock time on a task (Time/`taskTime`) is set in the app, not via this
   MCP — a deliberate MCP choice (the double-write sync, see
   `set_reminder`), NOT a Marvin limitation: Marvin fully supports times on
@@ -332,8 +334,11 @@ Everything below was verified against the live API (2026-08-19 through
 - `/todayTimeBlocks` omits the block↔category link (issue #65); this
   server recovers the mapping from the `strategySettings.plannerSmartLists`
   profile document.
-- Stopping time tracking via the API does not update the task's own
-  `times`/`duration` fields; `/tracks` is the source of truth.
+- Stopping time tracking via a direct `/track STOP` does not update the
+  task's own `times`/`duration` fields; `/tracks` is the source of truth.
+  `/markDone` during active tracking does write both `times` (live-tested
+  2026-09-02) and `duration` (verified 2026-09-13; the app shows the
+  tracked time under Completed Today when Time Tracking is on).
 - Calendar events created via `/addEvent` sync onwards only while the
   Marvin app is running somewhere (client-side calendar sync).
 
@@ -352,7 +357,13 @@ Everything below was verified against the live API (2026-08-19 through
   not aggregate it with the children's estimates, despite the wiki's claim.
 - Snoozed tasks (`itemSnoozeTime`) are hidden from the category view too —
   the wiki's "everywhere except the master list" doesn't hold there.
-- `timeBlockSection` is stored but shows no visible section link in Today.
+- `timeBlockSection` is stored but shows no visible section link in Today
+  (re-verified 2026-09-13, app 1.70.0.0, PWA + desktop). In the app the
+  link is carried by the *block's* own mapping to a label/category/smart
+  list, and a block shows its tasks only during its own clock time. Since
+  1.7.0 `create_time_block` returns `time_block_id` (set client-side, as
+  `/doc/create` does not echo the server id), usable directly as
+  `time_block_section`.
 - `reviewDate` shows in the Review view; the day-view banner additionally
   requires the "Review Alert" workflow snippet.
 - Auto-orbit (if enabled) pulls newly scheduled tasks into Orbit unless

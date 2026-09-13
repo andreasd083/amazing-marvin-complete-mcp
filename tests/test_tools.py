@@ -127,13 +127,16 @@ async def test_record_habit_and_undo(init_server, transport):
 
 
 async def test_create_time_block_doc_shape(init_server, transport):
-    await server.create_time_block.fn(
+    result = await server.create_time_block.fn(
         title="Morning", date="2026-08-20", start_time="08:00", duration_minutes=180
     )
     body = transport.last_json()
     assert body["db"] == "PlannerItems"
     assert body["time"] == "08:00"
     assert body["duration"] == "180"
+    # 1.7.0: the id is set client-side (/doc/create does not echo it) and returned
+    assert len(body["_id"]) == 32 and body["_id"].isalnum()
+    assert result["time_block_id"] == body["_id"]
 
 
 async def test_time_blocks_include_category_mapping(init_server, transport):
