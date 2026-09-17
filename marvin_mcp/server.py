@@ -277,7 +277,7 @@ async def create_task(
     ] = None,
     time_block_section: Annotated[
         str | None,
-        Field(description="Time block ID (from get_today_time_blocks, or time_block_id from create_time_block). NOTE: stored, but gives no visible link in Today (verified in the app 2026-08-29, and re-verified 2026-09-13 with app 1.70.0.0, PWA + desktop, Time Blocking on). In the app the link is carried by the block's own mapping to a label/category/smart list (see get_today_time_blocks), and a block shows its tasks only during its own clock time — to make a task appear in a block, give the block a category in the app and put the task there. Reported upstream"),
+        Field(description="Time block ID (from get_today_time_blocks, or time_block_id from create_time_block). Points the task at a time block; the task then appears under that block's section in Today. Three conditions (verified in the app 2026-09-17, 1.70.0.0, PWA + desktop): (1) the Time Block Sections strategy is on, (2) the day view is grouped by time block (Group by → Group by time block section — set per device, not synced; help article 1950243), (3) the task is scheduled on the block's day (day ≤ that date) — an unscheduled task with the field set is stored but does not appear in Today at all. Without (2) no sections render and the field looks inert. The field is sufficient on its own: the block needs no label/category/smart list, and blocks from create_time_block behave like blocks created in the app. The block's own Smart Time Block mapping (label/category) is a second, independent route that catches matching tasks without this field. The section shows before the block's start time (after its end: untested). The field is not exposed in the app's task settings — the app sets it when a task is added directly inside a block section"),
     ] = None,
 ) -> dict:
     """Create a task in Amazing Marvin. Prefer priority/frog over dates
@@ -466,7 +466,7 @@ async def update_task(
     ] = None,
     time_block_section: Annotated[
         str | None,
-        Field(description="Time block ID (from get_today_time_blocks, or time_block_id from create_time_block), '' removes. NOTE: stored, but gives no visible link in Today (verified in the app 2026-08-29 and 2026-09-13); in the app the link is carried by the block's own label/category/smart-list mapping — see create_task"),
+        Field(description="Time block ID (from get_today_time_blocks, or time_block_id from create_time_block), '' removes. Shows under the block's section in Today when Time Block Sections is on, the day view is grouped by time block (per device, not synced) and the task is scheduled on the block's day — see create_task"),
     ] = None,
     snooze_until_unix_ms: Annotated[
         int | None,

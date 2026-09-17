@@ -357,10 +357,16 @@ Everything below was verified against the live API (2026-08-19 through
   not aggregate it with the children's estimates, despite the wiki's claim.
 - Snoozed tasks (`itemSnoozeTime`) are hidden from the category view too —
   the wiki's "everywhere except the master list" doesn't hold there.
-- `timeBlockSection` is stored but shows no visible section link in Today
-  (re-verified 2026-09-13, app 1.70.0.0, PWA + desktop). In the app the
-  link is carried by the *block's* own mapping to a label/category/smart
-  list, and a block shows its tasks only during its own clock time. Since
+- `timeBlockSection` links a task to a time block's section in Today — but
+  only if the Time Block Sections strategy is on, the day view is grouped
+  by time block (Group by → Group by time block section; set per device,
+  not synced) and the task is scheduled on the block's day. Unscheduled
+  tasks with the field set do not appear in Today at all. The block needs
+  no label/category mapping of its own; that mapping (Smart Time Block) is
+  a second, independent route. Verified in the app 2026-09-17 (1.70.0.0,
+  PWA + desktop); the earlier "stored but not rendered" finding was our own
+  test error (grouping never set) and is withdrawn; the correction to
+  Marvin support is pending. Since
   1.7.0 `create_time_block` returns `time_block_id` (set client-side, as
   `/doc/create` does not echo the server id), usable directly as
   `time_block_section`.

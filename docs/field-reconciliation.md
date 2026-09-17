@@ -21,10 +21,10 @@ Orbit view unless `noAutoOrbit` is set.
   trumps the flag), startDate (hides backburner items), rewardPoints
   (strategy on), project priority/frog/timeEstimate rendering, snooze
   fields, reviewDate, plannedWeek/Month.
-- Stored but not rendered: timeBlockSection (no visible section link in
-  Today; re-verified 2026-09-13 — the link is carried by the block's own
-  label/category/smart-list mapping), project icons (projects never render
-  an own icon).
+- Stored but not rendered: project icons (projects never render an own
+  icon). timeBlockSection was listed here until 2026-09-17: the "no visible
+  section link" finding was our own test error (the day view was never
+  grouped by time block) and is withdrawn — see the field row below.
 - Wiki corrections found: project timeEstimate is NOT aggregated with the
   children's estimates in the UI; snoozed tasks are hidden from the
   category view too (not just 'everywhere except the master list').
@@ -189,7 +189,7 @@ write) — documented in the descriptions as an orphan risk.
 | `dailySection` | supported | `create_task`, `update_task` (dailyStructure strategy) |
 | `bonusSection` | supported | `create_task`, `update_task` (bonusStructure strategy) |
 | `customSection` | supported | `create_task`, `update_task` (customStructure strategy) |
-| `timeBlockSection` | supported (stored but not rendered) | `create_task`, `update_task` — no visible section link in Today even with the strategy active (verified in the app 2026-08-29, re-verified 2026-09-13 in app 1.70.0.0, PWA + desktop). In the app the link is carried by the block's own label/category/smart-list mapping (`plannerSmartLists`), not by the field. Since 1.7.0 `create_time_block` returns `time_block_id` (client-set `_id`; live-tested 2026-09-13: accepted, listed in `/todayTimeBlocks` with the same id) |
+| `timeBlockSection` | supported | `create_task`, `update_task` — points the task at a time block; the task appears under that block's section in Today. Three conditions (verified in the app 2026-09-17, 1.70.0.0, PWA + desktop): the Time Block Sections strategy on; the day view grouped by time block (Group by → Group by time block section — per device, not synced; help article 1950243); the task scheduled on the block's day (`day` ≤ that date — an unscheduled task with the field set is stored but does not appear in Today). The field is sufficient on its own: the block needs no label/category/smart list, and blocks from `create_time_block` (client-set `_id`, live-tested 2026-09-13) behave like app-created ones. The block's own Smart Time Block mapping (label/category) is a second, independent route that catches matching tasks without the field. The section shows before the block's start time; after its end: untested. The field is not exposed in the app's task settings — the app sets it when a task is added directly inside a block section. The earlier "stored but not rendered" wording (2026-08-29, 2026-09-13) was our own test error — grouping never set — and is withdrawn 2026-09-17 (correction to Marvin support pending); Marvin support had already reproduced the field working 2026-09-14 |
 | `itemSnoozeTime` | supported (update only) | `update_task` (`snooze_until_unix_ms`) — hides from Today AND the category view (verified in the app 2026-08-29; the wiki's 'except the master list' does not hold for the category view) |
 | `permaSnoozeTime` | supported (update only) | `update_task` — `/addTask` ignores the field; hides from Today (verified in the app 2026-08-29) |
 | `orbit`, `noAutoOrbit` | supported (update only) | `update_task` — undocumented in the wiki; orbit=true verified in the app 2026-08-29 (Orbit view + icon in Today). Auto-orbit pulls in scheduled tasks unless noAutoOrbit is set. **`/addTask` silently drops `noAutoOrbit`** (live-tested 2026-09-13: 200, the field is absent from both the echo and the stored document) — hence no create parameter; set it with update_task after creating |
