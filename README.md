@@ -373,9 +373,10 @@ Everything below was verified against the live API (2026-08-19 through
 - `startDate` hides *backburner* items until their start date (the Start
   Dates strategy's actual mechanic) — it does not hide scheduled tasks.
 - Icon names are library-prefixed (`lucide-Rocket`, `huge-happy`) or emoji.
-  Projects render their icon only with Master List → Configure View →
-  "Show Custom Icon On" = "Categories & Projects" (verified 2026-08-31; the
-  earlier "projects never render an own icon" was our own test error).
+  Projects render their icon only when Master List → Configure View →
+  "Show Custom Icon On" includes projects — "Categories & Projects"
+  (verified 2026-08-31) or "Just Projects" (verified 2026-09-18); the
+  earlier "projects never render an own icon" was our own test error.
 - A project's `timeEstimate` renders as its own estimate; the UI does
   not aggregate it with the children's estimates, despite the wiki's claim.
 - Snoozed tasks (`itemSnoozeTime`) are hidden from the category view too —

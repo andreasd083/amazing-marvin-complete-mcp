@@ -21,9 +21,10 @@ Orbit view unless `noAutoOrbit` is set.
   trumps the flag), startDate (hides backburner items), rewardPoints
   (strategy on), project priority/frog/timeEstimate rendering, snooze
   fields, reviewDate, plannedWeek/Month.
-- Project icons render only with Master List → Configure View → "Show
-  Custom Icon On" = "Categories & Projects" (verified 2026-08-31; the earlier
-  "projects never render an own icon" was our test error). timeBlockSection was listed here until 2026-09-17: the "no visible
+- Project icons render only when Master List → Configure View → "Show
+  Custom Icon On" includes projects: "Categories & Projects" (verified
+  2026-08-31) or "Just Projects" (verified 2026-09-18); the earlier
+  "projects never render an own icon" was our test error. timeBlockSection was listed here until 2026-09-17: the "no visible
   section link" finding was our own test error (the day view was never
   grouped by time block) and is withdrawn — see the field row below.
 - Wiki corrections found: project timeEstimate is NOT aggregated with the
@@ -215,7 +216,7 @@ write) — documented in the descriptions as an orphan risk.
 | `parentId` | supported | `create_category_or_project`, `update_category_or_project` |
 | `note` | supported | `create_category_or_project`, `update_category_or_project` |
 | `color` | supported | `create_category_or_project` (category only — `/addProject` ignores the field), `update_category_or_project` (both) |
-| `icon` | supported | as `color`; format = library-prefixed names ('lucide-Rocket', 'huge-happy') or emoji, API-set values render (verified in the app 2026-08-29). On projects the icon renders only with Master List → Configure View → 'Show Custom Icon On' = 'Categories & Projects' (verified 2026-08-31; 'projects NEVER render their own icon' was our test error, corrected 2026-09-18) |
+| `icon` | supported | as `color`; format = library-prefixed names ('lucide-Rocket', 'huge-happy') or emoji, API-set values render (verified in the app 2026-08-29). On projects the icon renders only when Master List → Configure View → 'Show Custom Icon On' includes projects: 'Categories & Projects' (verified 2026-08-31) or 'Just Projects' (verified 2026-09-18); the Main/All Categories modes are untested for subcategory icons. 'Projects NEVER render their own icon' was our test error, corrected 2026-09-18 |
 | `timeEstimate` | supported | `create_category_or_project`, `update_category_or_project` — the project's OWN estimate renders; no aggregation with the children's despite the wiki's claim (verified in the app 2026-08-29) |
 | `startDate` | supported (update only) | `update_category_or_project` — `/addProject` ignores the field (live-tested 2026-08-29) |
 | `endDate` | supported (update only) | as `startDate` |

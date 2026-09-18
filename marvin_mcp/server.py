@@ -848,7 +848,7 @@ async def create_category_or_project(
     ] = None,
     icon: Annotated[
         str | None,
-        Field(description="Icon name with a library prefix, e.g. 'lucide-Rocket' (Lucide, PascalCase) or 'huge-happy' (verified in the app 2026-08-29); the app's picker also allows emoji. Rendered directly on categories; on projects only with Master List → Configure View → 'Show Custom Icon On' = 'Categories & Projects' (verified in the app 2026-08-31 — the earlier wording 'projects never render their own icon' was wrong)"),
+        Field(description="Icon name with a library prefix, e.g. 'lucide-Rocket' (Lucide, PascalCase) or 'huge-happy' (verified in the app 2026-08-29); the app's picker also allows emoji. Rendered directly on categories; on projects only when Master List → Configure View → 'Show Custom Icon On' includes projects ('Categories & Projects' verified in the app 2026-08-31, 'Just Projects' 2026-09-18; the earlier wording 'projects never render their own icon' was wrong)"),
     ] = None,
     time_estimate_minutes: Annotated[
         int | None,
@@ -1003,7 +1003,7 @@ async def update_category_or_project(
     color: Annotated[str | None, Field(description="Color '#rrggbb', '' removes")] = None,
     icon: Annotated[
         str | None,
-        Field(description="Icon name with a library prefix ('lucide-Rocket', 'huge-happy'), '' removes. Rendered directly on categories; on projects only with Master List → Configure View → 'Show Custom Icon On' = 'Categories & Projects' (verified in the app 2026-08-31 — the earlier wording 'projects never render their own icon' was wrong)"),
+        Field(description="Icon name with a library prefix ('lucide-Rocket', 'huge-happy'), '' removes. Rendered directly on categories; on projects only when Master List → Configure View → 'Show Custom Icon On' includes projects ('Categories & Projects' verified in the app 2026-08-31, 'Just Projects' 2026-09-18; the earlier wording 'projects never render their own icon' was wrong)"),
     ] = None,
     time_estimate_minutes: Annotated[
         int | None,
