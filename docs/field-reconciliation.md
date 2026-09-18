@@ -215,7 +215,7 @@ write) — documented in the descriptions as an orphan risk.
 | `parentId` | supported | `create_category_or_project`, `update_category_or_project` |
 | `note` | supported | `create_category_or_project`, `update_category_or_project` |
 | `color` | supported | `create_category_or_project` (category only — `/addProject` ignores the field), `update_category_or_project` (both) |
-| `icon` | supported (categories only meaningful) | as `color`; format = library-prefixed names ('lucide-Rocket', 'huge-happy') or emoji, API-set values render (verified in the app 2026-08-29). Projects NEVER render their own icon — the app offers the picker but only the color is used |
+| `icon` | supported | as `color`; format = library-prefixed names ('lucide-Rocket', 'huge-happy') or emoji, API-set values render (verified in the app 2026-08-29). On projects the icon renders only with Master List → Configure View → 'Show Custom Icon On' = 'Categories & Projects' (verified 2026-08-31; 'projects NEVER render their own icon' was our test error, corrected 2026-09-18) |
 | `timeEstimate` | supported | `create_category_or_project`, `update_category_or_project` — the project's OWN estimate renders; no aggregation with the children's despite the wiki's claim (verified in the app 2026-08-29) |
 | `startDate` | supported (update only) | `update_category_or_project` — `/addProject` ignores the field (live-tested 2026-08-29) |
 | `endDate` | supported (update only) | as `startDate` |

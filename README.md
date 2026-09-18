@@ -4,7 +4,7 @@
 
 An MCP ([Model Context Protocol](https://modelcontextprotocol.io)) server for
 [Amazing Marvin](https://amazingmarvin.com) with **complete coverage of the
-public API**: 37 tools over all ~31 documented endpoints (plus the
+public API**: 38 tools over all ~31 documented endpoints (plus the
 undocumented `/doneItems`), a global rate
 limiter that respects Marvin's documented limits, least-privilege token
 routing, and MCP tool annotations. As of 1.1.0 every writable field in
@@ -373,8 +373,9 @@ Everything below was verified against the live API (2026-08-19 through
 - `startDate` hides *backburner* items until their start date (the Start
   Dates strategy's actual mechanic) — it does not hide scheduled tasks.
 - Icon names are library-prefixed (`lucide-Rocket`, `huge-happy`) or emoji.
-  Projects never render an own icon — the app offers the picker but only
-  the color is used.
+  Projects render their icon only with Master List → Configure View →
+  "Show Custom Icon On" = "Categories & Projects" (verified 2026-08-31; the
+  earlier "projects never render an own icon" was our own test error).
 - A project's `timeEstimate` renders as its own estimate; the UI does
   not aggregate it with the children's estimates, despite the wiki's claim.
 - Snoozed tasks (`itemSnoozeTime`) are hidden from the category view too —

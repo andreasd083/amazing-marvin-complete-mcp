@@ -1,6 +1,6 @@
 """MCP server for Amazing Marvin with complete public-API coverage.
 
-37 tools covering all ~31 documented public endpoints (plus the undocumented
+38 tools covering all ~31 documented public endpoints (plus the undocumented
 /doneItems): core CRUD + priority,
 habits, time blocks (read + experimental create), time tracking, labels,
 goals, reminders, and kudos/reward points. Deliberately no Smart List /
@@ -848,7 +848,7 @@ async def create_category_or_project(
     ] = None,
     icon: Annotated[
         str | None,
-        Field(description="Icon name with a library prefix, e.g. 'lucide-Rocket' (Lucide, PascalCase) or 'huge-happy' (verified in the app 2026-08-29); the app's picker also allows emoji. Categories ONLY — projects NEVER render their own icon (the flag stays; only the color is used)"),
+        Field(description="Icon name with a library prefix, e.g. 'lucide-Rocket' (Lucide, PascalCase) or 'huge-happy' (verified in the app 2026-08-29); the app's picker also allows emoji. Rendered directly on categories; on projects only with Master List → Configure View → 'Show Custom Icon On' = 'Categories & Projects' (verified in the app 2026-08-31 — the earlier wording 'projects never render their own icon' was wrong)"),
     ] = None,
     time_estimate_minutes: Annotated[
         int | None,
