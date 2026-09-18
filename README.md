@@ -24,7 +24,7 @@ which may be useful even if you never run this server.
 > you through setup and troubleshooting far faster than I can. Provided
 > as-is, without guarantees — it's MIT, fork freely.
 
-## Tools (37)
+## Tools (38)
 
 | Group | Tools |
 |---|---|
@@ -35,7 +35,29 @@ which may be useful even if you never run this server.
 | Time blocks | `get_today_time_blocks`, `create_time_block` (experimental) |
 | Time tracking | `get_tracked_item`, `start_tracking`, `stop_tracking`, `get_time_tracks` |
 | Kudos/rewards | `get_kudos`, `claim_reward_points`, `unclaim_reward_points`, `spend_reward_points`, `reset_reward_points` |
-| Misc | `get_labels`, `get_goals`, `get_reminders`, `set_reminder`, `delete_reminder`, `create_event` (experimental), `get_account_info`, `get_rate_limit_status` |
+| Misc | `get_labels`, `get_goals`, `get_reminders`, `set_reminder`, `delete_reminder`, `create_event` (experimental), `get_account_info`, `get_rate_limit_status`, `list_capabilities` |
+
+### Capability overview
+
+`list_capabilities` (no Marvin API call) returns the same map as the table
+below, per tool with *can* and *cannot*, plus the list of things that only
+work in the app. Call it before assuming something is impossible via MCP.
+The server also sends a short `instructions` text at `initialize` (shown by
+Claude Code, not by the claude.ai clients). The first line of every tool
+description is a whole sentence of at most 75 characters stating the
+capability — the clients show only that line in their catalog; the test
+`tests/test_discoverability.py` guards it.
+
+| Area | Can via MCP | Cannot via MCP (done in the app) |
+|---|---|---|
+| Tasks | create/update/complete/delete, priority and frog, day, deadline, labels, estimate, note, sections, planned week/month, review date, backburner, orbit, snooze, time block; read today's, due and done | a time/reminder on the task (taskTime), recurrence rules, startDate at creation (update_task afterwards) |
+| Structure | the hierarchy, children, create/update/convert categories and projects, labels on both, color, icon, note; read labels and goals | creating/editing labels, goals, smart lists, strategies; completing projects |
+| Habits | list, tracking record, record/undo | creating/editing habits |
+| Time | today's time blocks with mapping, create a block, time tracking start/stop/history | the smart-time-block mapping on a block |
+| Rewards | kudos, award/undo/spend/reset reward points | undoing a MANUAL award; reading the app's Rewards |
+| Reminders | server-side reminders: list, set standalone, delete | task-linked reminders (two-write sync) |
+| Calendar | create an event (experimental) | reading/editing events |
+| Account | test, account info, call budget, capability overview | — |
 
 Deliberately **not** included: Smart List / task-picking logic (Marvin's own
 Spotlight does the picking; the server gives your assistant hands, not

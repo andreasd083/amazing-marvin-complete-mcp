@@ -21,8 +21,9 @@ Orbit view unless `noAutoOrbit` is set.
   trumps the flag), startDate (hides backburner items), rewardPoints
   (strategy on), project priority/frog/timeEstimate rendering, snooze
   fields, reviewDate, plannedWeek/Month.
-- Stored but not rendered: project icons (projects never render an own
-  icon). timeBlockSection was listed here until 2026-09-17: the "no visible
+- Project icons render only with Master List → Configure View → "Show
+  Custom Icon On" = "Categories & Projects" (verified 2026-08-31; the earlier
+  "projects never render an own icon" was our test error). timeBlockSection was listed here until 2026-09-17: the "no visible
   section link" finding was our own test error (the day view was never
   grouped by time block) and is withdrawn — see the field row below.
 - Wiki corrections found: project timeEstimate is NOT aggregated with the

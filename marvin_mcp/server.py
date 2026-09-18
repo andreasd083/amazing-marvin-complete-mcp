@@ -33,7 +33,24 @@ from .ratelimit import DailyBudgetExceeded, QueueTimeout, RateLimiter
 
 logger = logging.getLogger(__name__)
 
-mcp: FastMCP = FastMCP(name="amazing-marvin")
+INSTRUCTIONS = (
+    "Amazing Marvin MCP — 38 tools. Areas: tasks (create/update/mark_done/"
+    "delete_task, set_priority, get_today/due/done_items), structure (get_categories, "
+    "get_children, create/update/convert_category_or_project, get_labels), habits "
+    "(list_habits, get_habit, record_habit), time (get_today_time_blocks, "
+    "create_time_block, start/stop_tracking, get_tracked_item, get_time_tracks), "
+    "rewards (get_kudos, claim/unclaim/spend/reset_reward_points), reminders "
+    "(get/set/delete_reminder), goals (get_goals), account (get_account_info, "
+    "test_connection, get_rate_limit_status), calendar (create_event). "
+    "NOT possible via MCP but possible in the app: a time/reminder on a task "
+    "(taskTime), recurrence rules, startDate at creation (set it with update_task "
+    "afterwards), completing projects. Labels can be set on both categories and "
+    "projects (update_category_or_project). Call list_capabilities for the full map "
+    "with can/cannot per tool before assuming something is impossible. "
+    "Marvin budget ~60 calls/hour, 1440/day."
+)
+
+mcp: FastMCP = FastMCP(name="amazing-marvin", instructions=INSTRUCTIONS)
 
 _client: MarvinClient | None = None
 _limiter: RateLimiter | None = None
@@ -209,7 +226,8 @@ DESTRUCTIVE = {  # deletes permanently; repeating changes nothing more
 
 @mcp.tool(annotations=READONLY)
 async def test_connection() -> dict:
-    """Test authentication against Marvin's API. Returns OK if the apiToken
+    """Check that the API token works against Marvin's API.
+    Returns OK if the apiToken
     works."""
     try:
         result = await get_client().test_credentials()
@@ -280,7 +298,8 @@ async def create_task(
         Field(description="Time block ID (from get_today_time_blocks, or time_block_id from create_time_block). Points the task at a time block; the task then appears under that block's section in Today. Three conditions (verified in the app 2026-09-17, 1.70.0.0, PWA + desktop): (1) the Time Block Sections strategy is on, (2) the day view is grouped by time block (Group by → Group by time block section — set per device, not synced; help article 1950243), (3) the task is scheduled on the block's day (day ≤ that date) — an unscheduled task with the field set is stored but does not appear in Today at all. Without (2) no sections render and the field looks inert. The field is sufficient on its own: the block needs no label/category/smart list, and blocks from create_time_block behave like blocks created in the app. The block's own Smart Time Block mapping (label/category) is a second, independent route that catches matching tasks without this field. The section shows before the block's start time (after its end: untested). The field is not exposed in the app's task settings — the app sets it when a task is added directly inside a block section"),
     ] = None,
 ) -> dict:
-    """Create a task in Amazing Marvin. Prefer priority/frog over dates
+    """Create a task with category, day, priority, labels, estimate, sections.
+    Prefer priority/frog over dates
     where possible.
 
     The title is stored verbatim: this tool disables the server's shortcut
@@ -361,7 +380,8 @@ async def create_task(
 async def mark_done(
     item_id: Annotated[str, Field(description="Task ID (NOT a project — see description)")],
 ) -> dict:
-    """Mark a task as done (via /markDone, with the correct timezone offset).
+    """Mark a task as done; projects are completed in the app.
+    Mark a task as done (via /markDone, with the correct timezone offset).
     Tasks ONLY: for projects the API responds 400 'Can only mark Tasks done
     with this API' (verified live 2026-08-19) — projects are completed in the
     Marvin app (done=true via /doc/update would technically work but skips
@@ -393,7 +413,8 @@ async def mark_done(
 async def unmark_done(
     item_id: Annotated[str, Field(description="Task ID")],
 ) -> dict:
-    """Undo a completion (sets done=false and clears doneAt via /doc/update).
+    """Undo a task's completion.
+    Undo a completion (sets done=false and clears doneAt via /doc/update).
     Requires the Full Access Token. Safe for generated instances of recurring
     tasks too (verified live). Note: any kudos from the completion are not
     adjusted; awarded reward points can however be undone with
@@ -485,7 +506,8 @@ async def update_task(
         Field(description="Orbit strategy: True = exempt the task from automatic orbiting (auto-orbit otherwise pulls in scheduled tasks). UNDOCUMENTED field (bool type verified in live data 2026-08-29)"),
     ] = None,
 ) -> dict:
-    """Update fields on an existing TASK via /doc/update (Full Access Token).
+    """Update a task: title, day, deadline, labels, note, estimate, sections.
+    Update fields on an existing TASK via /doc/update (Full Access Token).
     For categories/projects, use update_category_or_project. For priority,
     use set_priority. Always complete tasks via mark_done, never here.
     Strategy-dependent fields (start/end date, planned_week/month,
@@ -584,7 +606,8 @@ async def set_priority(
         Field(description="Frog: 3=monster, 2=baby, 1=normal, 0=remove", ge=0, le=3),
     ] = None,
 ) -> dict:
-    """Set or change priority (isStarred) and/or the frog marker on an
+    """Set priority (P1-P3 or low) or the frog marker on a task.
+    Set or change priority (isStarred) and/or the frog marker on an
     existing TASK. Requires the Full Access Token. The app's four levels are
     stored as isStarred 3/2/1/-1 (Most/Very/Important/Low priority; -1
     verified against the app's code and live-tested 2026-08-30). Low
@@ -613,7 +636,8 @@ async def set_priority(
 async def delete_task(
     item_id: Annotated[str, Field(description="ID of the document to delete")],
 ) -> dict:
-    """Delete a task/document PERMANENTLY via /doc/delete (Full Access Token).
+    """Delete a task permanently, with no trash and no undo.
+    Delete a task/document PERMANENTLY via /doc/delete (Full Access Token).
     Marvin's trash is client-side — an API deletion bypasses it and
     CANNOT be undone (deleting in the app instead puts the item in the
     trash, where it can be restored — prefer the app when undo matters). Only use when the
@@ -651,7 +675,8 @@ async def get_today_items(
         str | None, Field(description="Date YYYY-MM-DD; returns everything open with day <= the date; omit for today (MARVIN_TIMEZONE, else the system timezone)")
     ] = None,
 ) -> dict:
-    """Get open tasks/projects with `day` <= the date (default today in
+    """Get open tasks and projects scheduled today or earlier.
+    Get open tasks/projects with `day` <= the date (default today in
     MARVIN_TIMEZONE, or the system's local timezone when unset) — i.e.
     also items scheduled earlier than the date, not only those on exactly
     that day. Tasks that only have a deadline are not included; fetch them
@@ -672,7 +697,7 @@ async def get_due_items(
         str | None, Field(description="Deadline up to and including YYYY-MM-DD; omit for today")
     ] = None,
 ) -> dict:
-    """Get open tasks/projects with a deadline today or earlier."""
+    """Get open tasks and projects with a deadline today or earlier."""
     try:
         items = await get_client().due_items(by)
         return {"by": by or local_today(), "count": len(items), "items": items}
@@ -691,7 +716,8 @@ async def get_done_items(
         Field(description="Days before the date for which /doneItems is also fetched, to catch tasks scheduled earlier but completed on the date. Each day = one read call (~3.1 s in the queue). Default 7", ge=0, le=14),
     ] = 7,
 ) -> dict:
-    """Tasks completed on a given date (doneAt within that day, configured
+    """Get tasks completed on a given date.
+    Tasks completed on a given date (doneAt within that day, configured
     timezone) — regardless of priority and deadline. Built on the
     UNDOCUMENTED endpoint GET /doneItems?date= (missing from the OpenAPI
     spec and the wiki; live-tested 2026-08-30, may disappear): it filters
@@ -782,7 +808,8 @@ async def get_children(
         Field(description="Category/project ID, 'unassigned' for the Inbox, or 'root' for the top level"),
     ],
 ) -> dict:
-    """Get open tasks and subprojects in a category/project. Returns direct
+    """Get open tasks and subprojects in a category or project.
+    Returns direct
     children only — call again for deeper levels. Note: orphans (tasks whose
     parentId points to a deleted/non-existent document) do NOT show up under
     'unassigned' — only in get_today_items/get_due_items if they have a
@@ -797,7 +824,8 @@ async def get_children(
 
 @mcp.tool(annotations=READONLY)
 async def get_categories() -> dict:
-    """Get all categories and projects (the whole hierarchy; parentId='root'
+    """Get all categories and projects as a hierarchy with id and parentId.
+    Get all categories and projects (the whole hierarchy; parentId='root'
     is the top level). Use to find the right parent_id when creating/moving."""
     try:
         cats = await get_client().categories()
@@ -856,7 +884,8 @@ async def create_category_or_project(
         list[str] | None, Field(description="Label IDs (from get_labels) — categories AND projects: categories have labels, stored in the same field as projects' and rendered in the app (live-tested + verified in the app 2026-09-11)")
     ] = None,
 ) -> dict:
-    """Create a category (via /doc/create, Full Access Token) or a project
+    """Create a category or project with color, icon, labels and note.
+    Create a category (via /doc/create, Full Access Token) or a project
     (via /addProject). Categories can contain categories; projects cannot.
     day/due_date/priority/frog are rejected for kind='category' for a
     structural reason, not a technical one: a category can never be
@@ -974,7 +1003,7 @@ async def update_category_or_project(
     color: Annotated[str | None, Field(description="Color '#rrggbb', '' removes")] = None,
     icon: Annotated[
         str | None,
-        Field(description="Icon name with a library prefix ('lucide-Rocket', 'huge-happy'), '' removes. ONLY meaningful on categories — projects never render their own icon (verified in the app 2026-08-29)"),
+        Field(description="Icon name with a library prefix ('lucide-Rocket', 'huge-happy'), '' removes. Rendered directly on categories; on projects only with Master List → Configure View → 'Show Custom Icon On' = 'Categories & Projects' (verified in the app 2026-08-31 — the earlier wording 'projects never render their own icon' was wrong)"),
     ] = None,
     time_estimate_minutes: Annotated[
         int | None,
@@ -1032,7 +1061,8 @@ async def update_category_or_project(
         Field(description="Orbit strategy: True = exempt from automatic orbiting. UNDOCUMENTED field (bool type verified in live data 2026-08-29)"),
     ] = None,
 ) -> dict:
-    """Update fields on an existing CATEGORY or PROJECT via /doc/update
+    """Update a category or project: labels, color, icon, note, project fields.
+    Update fields on an existing CATEGORY or PROJECT via /doc/update
     (Full Access Token). For tasks, use update_task. Fields marked
     'Projects ONLY' (day/due_date/priority/frog) are blocked for
     categories: if any of them is given, the tool first reads the document
@@ -1156,7 +1186,8 @@ async def convert_category_or_project(
         Field(description="Only for to='category': True = clear day / dueDate / priority / isFrogged / firstScheduled (like the app's buggy Edit Settings path — yields a CLEAN category without e.g. a deadline badge, for a permanent conversion); the previous values are then returned in removed_project_fields. Default False = lossless, like the app's correct path"),
     ] = False,
 ) -> dict:
-    """EXPERIMENTAL: Convert project→category or category→project IN PLACE
+    """Convert a project to a category or back, in place and losslessly.
+    EXPERIMENTAL: Convert project→category or category→project IN PLACE
     via /doc/update (Full Access Token; there is no official conversion
     endpoint, and this relies on undocumented server behavior that Marvin
     could change). Same _id, createdAt and children remain — conversion is a
@@ -1216,7 +1247,8 @@ async def convert_category_or_project(
 
 @mcp.tool(annotations=READONLY)
 async def list_habits() -> dict:
-    """Get all habits as full documents incl. title, settings and history
+    """Get all habits with title, settings and history.
+    Get all habits as full documents incl. title, settings and history
     ([time1, value1, time2, value2, ...], unix ms). Requires the Full Access
     Token (the raw variant of /habits). Important (verified live 2026-08-19):
     non-raw /habits would be wrong here — it reads the server's tracking
@@ -1234,7 +1266,8 @@ async def list_habits() -> dict:
 async def get_habit(
     habit_id: Annotated[str, Field(description="Habit ID (from list_habits)")],
 ) -> dict:
-    """Get the server's tracking record for a single habit (habitId + full
+    """Get a habit's server tracking record with its full history.
+    Get the server's tracking record for a single habit (habitId + full
     history — the source of truth for recordings). Note: the response lacks
     title and settings; those are in list_habits."""
     try:
@@ -1249,7 +1282,8 @@ async def record_habit(
     value: Annotated[float, Field(description="Value to record (1 for boolean habits)")] = 1,
     undo: Annotated[bool, Field(description="True to undo the latest recording instead")] = False,
 ) -> dict:
-    """Record (or undo) a habit. Also updates the sync database
+    """Record or undo a habit check-in, synced to the app.
+    Also updates the sync database
     (updateDB=true) so the Marvin app shows the change immediately."""
     try:
         data: dict[str, Any] = {"habitId": habit_id, "updateDB": True}
@@ -1279,7 +1313,8 @@ async def get_today_time_blocks(
         Field(description="Also look up the block→category/smartlist mapping (1 extra API call, requires Full Access Token)"),
     ] = True,
 ) -> dict:
-    """Get today's time blocks. The API response lacks the category link
+    """Get today's time blocks with their category or smart-list mapping.
+    The API response lacks the category link
     (known limitation, MarvinAPI issue #65); the mapping is therefore fetched
     separately from the profile setting plannerSmartLists (key = normalized
     block title)."""
@@ -1309,7 +1344,8 @@ async def create_time_block(
     start_time: Annotated[str, Field(description="Start time HH:mm (local time)")],
     duration_minutes: Annotated[int, Field(description="Length in minutes", gt=0)],
 ) -> dict:
-    """EXPERIMENTAL: Create a time block via /doc/create (db='PlannerItems',
+    """Create a time block (experimental) and get its id back.
+    EXPERIMENTAL: Create a time block via /doc/create (db='PlannerItems',
     Full Access Token). No official endpoint exists. Verify in the app that
     the block looks right.
 
@@ -1342,7 +1378,7 @@ async def create_time_block(
 
 @mcp.tool(annotations=READONLY)
 async def get_tracked_item() -> dict:
-    """Show which task is currently being time-tracked (if any)."""
+    """Show which task is being time-tracked right now."""
     try:
         item = await get_client().tracked_item()
         return {"tracked_item": item or None}
@@ -1354,7 +1390,7 @@ async def get_tracked_item() -> dict:
 async def start_tracking(
     task_id: Annotated[str, Field(description="Task ID")],
 ) -> dict:
-    """Start time tracking for a task."""
+    """Start time tracking on a task."""
     try:
         return {"tracking": await get_client().track(task_id, "START")}
     except Exception as e:
@@ -1365,7 +1401,8 @@ async def start_tracking(
 async def stop_tracking(
     task_id: Annotated[str, Field(description="Task ID")],
 ) -> dict:
-    """Stop time tracking for a task. Note (documented API limitation,
+    """Stop time tracking on a task; the time lands in get_time_tracks.
+    Stop time tracking for a task. Note (documented API limitation,
     confirmed live 2026-09-02): the task's own times/duration fields are
     not updated by /track STOP — the tracking only lands in /tracks
     (get_time_tracks). Exception: mark_done during active tracking now
@@ -1380,7 +1417,8 @@ async def stop_tracking(
 async def get_time_tracks(
     task_ids: Annotated[list[str], Field(description="Up to 100 task IDs")],
 ) -> dict:
-    """Get time-tracking history for the given tasks (the source of truth,
+    """Get time-tracking history for up to 100 tasks.
+    Get time-tracking history for the given tasks (the source of truth,
     max 100 per call)."""
     try:
         if len(task_ids) > 100:
@@ -1416,7 +1454,8 @@ def reward_summary(profile: Any) -> dict:
 
 @mcp.tool(annotations=READONLY)
 async def get_kudos() -> dict:
-    """Get kudos, level and kudosRemaining (Marvin's XP system). Note: kudos
+    """Get kudos, level and kudosRemaining from Marvin's XP system.
+    Note: kudos
     is separate from reward points (the reward currency) — the point balance
     is in get_account_info. nextMultiplier only exists in /me, not here
     (known limitation, MarvinAPI issue #5)."""
@@ -1437,7 +1476,7 @@ async def claim_reward_points(
         str | None, Field(description="Date YYYY-MM-DD; omit for today (server timezone)")
     ] = None,
 ) -> dict:
-    """Award reward points for a completed task (or a manual celebration).
+    """Award reward points for a completed task or manually.
     Note: mark_done does not award a task's rewardPoints automatically
     through the API (cf. issue #6 about kudos) — call this tool separately
     afterwards. WARNING: a MANUAL award CANNOT be undone through the API
@@ -1464,7 +1503,8 @@ async def unclaim_reward_points(
         str | None, Field(description="Date YYYY-MM-DD; omit for today (server timezone)")
     ] = None,
 ) -> dict:
-    """Undo a point award (e.g. after a misclick, or when the task was
+    """Undo a reward-point award tied to a task.
+    Undo a point award (e.g. after a misclick, or when the task was
     un-completed with unmark_done). Only works for awards tied to a real
     task ID: Marvin's server stores no entry for MANUAL awards (verified
     live 2026-08-19, /unclaimRewardPoints responds 404 'No such entry').
@@ -1494,7 +1534,8 @@ async def spend_reward_points(
         str | None, Field(description="Date YYYY-MM-DD; omit for today (server timezone)")
     ] = None,
 ) -> dict:
-    """Spend reward points on a reward. Note (verified live): the API
+    """Spend reward points on a reward.
+    Note (verified live): the API
     responds 500 Internal Server Error if the balance would go negative —
     check the balance (get_account_info) before large purchases."""
     try:
@@ -1508,7 +1549,8 @@ async def spend_reward_points(
 
 @mcp.tool(annotations=DESTRUCTIVE)
 async def reset_reward_points() -> dict:
-    """Reset reward points PERMANENTLY: deletes the whole earn/spend history
+    """Reset reward points permanently, balance and history.
+    Reset reward points PERMANENTLY: deletes the whole earn/spend history
     and sets the balance to 0 (Full Access Token). CANNOT be undone — only
     use when the user explicitly asks for it."""
     try:
@@ -1523,7 +1565,7 @@ async def reset_reward_points() -> dict:
 
 @mcp.tool(annotations=READONLY)
 async def get_labels() -> dict:
-    """Get all labels (for label_ids when creating/filtering)."""
+    """Get all labels with ids, for label_ids and filtering."""
     try:
         labels = await get_client().labels()
         return {"count": len(labels), "labels": labels}
@@ -1543,7 +1585,7 @@ async def get_goals() -> dict:
 
 @mcp.tool(annotations=READONLY)
 async def get_reminders() -> dict:
-    """Get all server-side reminders (push notifications to the phone).
+    """Get all server-side reminders, push notifications to the phone.
     Requires the Full Access Token."""
     try:
         return {"reminders": await get_client().reminders()}
@@ -1560,7 +1602,9 @@ async def set_reminder(
         Field(description="Custom ID; randomized otherwise. Do NOT use a task ID here — see description."),
     ] = None,
 ) -> dict:
-    """Set a standalone push reminder (type 'M', requires the Marvin mobile
+    """Set a standalone push reminder to the phone.
+    Times on tasks are set in the app, not here.
+    Set a standalone push reminder (type 'M', requires the Marvin mobile
     app to be logged in). WARNING — data integrity: a task reminder in Marvin
     consists of TWO writes that only the app keeps in sync — reminder fields
     on the task document itself (taskTime, reminderTime, reminderOffset,
@@ -1597,7 +1641,8 @@ async def set_reminder(
 async def delete_reminder(
     reminder_ids: Annotated[list[str], Field(description="IDs of reminders to delete")],
 ) -> dict:
-    """Delete one or more server-side reminders. Note: for a reminder that
+    """Delete one or more server-side reminders.
+    Note: for a reminder that
     belongs to a task (set in the app), only the server-side entry is removed
     — the task document's reminder fields are not cleared, so the app may
     show it as active and recreate it. Prefer using this against standalone
@@ -1615,7 +1660,8 @@ async def create_event(
     length_minutes: Annotated[int, Field(description="Length in minutes", gt=0)],
     note: Annotated[str | None, Field(description="Note (markdown)")] = None,
 ) -> dict:
-    """EXPERIMENTAL: Create a calendar event. Calendar sync happens in the
+    """Create a calendar event (experimental), synced by the app.
+    EXPERIMENTAL: Create a calendar event. Calendar sync happens in the
     client — the Marvin app must be running on some device for the event to
     sync onwards to an external calendar."""
     try:
@@ -1633,7 +1679,7 @@ async def create_event(
 
 @mcp.tool(annotations=READONLY)
 async def get_account_info() -> dict:
-    """Get account info (/me): email, tracking status, etc."""
+    """Get account info (/me): email, tracking status and points balance."""
     try:
         return {"account": await get_client().me()}
     except Exception as e:
@@ -1642,9 +1688,101 @@ async def get_account_info() -> dict:
 
 @mcp.tool(annotations=READONLY)
 async def get_rate_limit_status() -> dict:
-    """Show how many Marvin API calls have been made today (budget 1440/day,
+    """Show today's Marvin API calls against the 1440/day budget.
+    Show how many Marvin API calls have been made today (budget 1440/day,
     shared by all tools)."""
     return {
         "calls_today": _limiter.calls_today if _limiter else 0,
         "daily_limit": 1440,
+    }
+
+
+# Capability overview. tests/test_discoverability.py requires every registered
+# tool to be listed here.
+CAPABILITIES: list[tuple[str, list[tuple[str, str, str | None]]]] = [
+    ("Tasks", [
+        ("create_task", "Create a task: category, day, deadline, priority, frog, labels, estimate, note, sections, planned week/month, review date, backburner, reward points",
+         "startDate/endDate, orbit/noAutoOrbit (set with update_task afterwards); a time/reminder on the task (set in the app)"),
+        ("update_task", "Change title, note, day, deadline, labels, estimate, sections, start/end date, planned week/month, review date, backburner, orbit, snooze, time block",
+         "time (taskTime) and the task's reminder fields (app); recurrence rules (app); completion (mark_done)"),
+        ("set_priority", "Priority P1-P3/low (isStarred 3/2/1/-1) and frog on a task", None),
+        ("mark_done", "Complete a task via /markDone (kudos, duration, times are set)", "projects (completed in the app); reward points are not awarded automatically (claim_reward_points)"),
+        ("unmark_done", "Undo a completion (done=false, doneAt cleared)", "kudos are not adjusted back"),
+        ("delete_task", "Delete a document permanently via the API", "undo (the trash is client-side); an open client does not render the deletion until reloaded"),
+        ("get_today_items", "Open tasks/projects with day <= date (rollover)", "recurring instances before the app has run; deadline-only items (get_due_items)"),
+        ("get_due_items", "Open tasks/projects with deadline <= today", None),
+        ("get_done_items", "Tasks completed on a date (doneAt), with lookback", "projects"),
+    ]),
+    ("Structure", [
+        ("get_categories", "The whole hierarchy of categories and projects", None),
+        ("get_children", "Direct children (open tasks, subprojects) of a category/project", "completed tasks; orphans; deeper levels in one call"),
+        ("create_category_or_project", "Category or project with color, icon, labels, note; projects also day/deadline/priority/frog", "day/deadline/priority/frog on a category (structural rule); '#' in project titles"),
+        ("update_category_or_project", "Labels (categories AND projects), color, icon, note, parent, planned week/month, review/start/end date, orbit; projects also day/deadline/priority/frog", "day/deadline/priority/frog on a category; completing projects"),
+        ("convert_category_or_project", "Switch type project<->category in place, losslessly", "a category with subcategories -> project"),
+        ("get_labels", "All labels with id and group", "creating/editing labels (app)"),
+        ("get_goals", "All goals with status and check-ins", "creating/editing goals (app)"),
+    ]),
+    ("Habits", [
+        ("list_habits", "All habits as documents: title, settings, history", "creating/editing habits (app)"),
+        ("get_habit", "The server's tracking record for one habit (full history)", "title/settings (list_habits)"),
+        ("record_habit", "Record or undo a habit, synced to the app", None),
+    ]),
+    ("Time", [
+        ("get_today_time_blocks", "Today's time blocks with block->category/smart-list mapping", "blocks on days other than the given date"),
+        ("create_time_block", "Create a time block (experimental); the response carries time_block_id", "smart-time-block mapping (set in the app)"),
+        ("get_tracked_item", "The task being time-tracked right now", None),
+        ("start_tracking", "Start time tracking on a task", None),
+        ("stop_tracking", "Stop time tracking; the time lands in /tracks", "updating the task's own times/duration (only mark_done does that)"),
+        ("get_time_tracks", "Tracking history for up to 100 tasks", None),
+    ]),
+    ("Rewards", [
+        ("get_kudos", "Kudos, level, kudosRemaining", "nextMultiplier (only in /me)"),
+        ("claim_reward_points", "Award reward points for a completed task or MANUAL", "undoing a MANUAL award"),
+        ("unclaim_reward_points", "Undo an award tied to a task", "MANUAL awards"),
+        ("spend_reward_points", "Spend reward points", "a negative balance (the server answers 500)"),
+        ("reset_reward_points", "Reset points and history permanently", "undo"),
+    ]),
+    ("Reminders", [
+        ("get_reminders", "All server-side reminders", None),
+        ("set_reminder", "Standalone push reminder to the phone", "a reminder/time on a task (set in the app; two-write sync)"),
+        ("delete_reminder", "Delete server-side reminders", "the task's own reminder fields (the app may recreate)"),
+    ]),
+    ("Calendar", [
+        ("create_event", "Calendar event (experimental), synced onwards by the app", "reading/editing events"),
+    ]),
+    ("Account and operations", [
+        ("test_connection", "Check that the API token works", None),
+        ("get_account_info", "Account info (/me): email, tracking status, points balance", None),
+        ("get_rate_limit_status", "Today's calls against the 1440/day budget", None),
+        ("list_capabilities", "This overview", None),
+    ]),
+]
+
+CANNOT_VIA_MCP: list[str] = [
+    "A time (Time/taskTime) or reminder on a task — set in the app (two-write sync; an MCP limitation, not a Marvin limitation)",
+    "Recurrence rules for recurring tasks — the app",
+    "Completing projects — the app",
+    "Creating or editing labels, goals, habits, smart lists and strategies — the app",
+    "Reading the app's Rewards (rewards to buy) — no endpoint",
+    "Undoing an API deletion — the app's trash is not reachable",
+    "Undoing a MANUAL reward-point award — the server keeps no record",
+    "Section strategies (time block/custom/daily/bonus) show in Today only if the strategy is on AND the day view is grouped by that section (per device)",
+]
+
+
+@mcp.tool(annotations=READONLY)
+async def list_capabilities() -> dict:
+    """List every Marvin tool by area, with what it can and cannot do.
+    Costs no Marvin API call. Call it before assuming something is impossible
+    via MCP or requires manual work in the app; field conditions and
+    live-tested details live in each tool's own description."""
+    areas = [
+        {"area": area, "tools": [{"name": n, "can": can, "cannot": cannot} for n, can, cannot in tools]}
+        for area, tools in CAPABILITIES
+    ]
+    return {
+        "tool_count": sum(len(t) for _, t in CAPABILITIES),
+        "areas": areas,
+        "cannot_via_mcp": CANNOT_VIA_MCP,
+        "note": "Field conditions, live-tested limitations and dates live in each tool's description; docs/field-reconciliation.md carries the per-field reference.",
     }
