@@ -4,8 +4,9 @@
 
 An MCP ([Model Context Protocol](https://modelcontextprotocol.io)) server for
 [Amazing Marvin](https://amazingmarvin.com) with **complete coverage of the
-public API**: 50 tools over all ~31 documented endpoints (plus the
-undocumented `/doneItems`), a global rate
+public API**: 50 tools over the 38 endpoints on Marvin's
+[API endpoints page](https://help.amazingmarvin.com/amazing-marvin/api-endpoints)
+(read 2026-10-12; all but two, see below), a global rate
 limiter that respects Marvin's documented limits, least-privilege token
 routing, and MCP tool annotations. As of 1.1.0 every writable field in
 Marvin's official data model (Tasks and Categories/Projects) is either
@@ -67,9 +68,10 @@ silently truncates longer text since v2.1.280.
 
 Deliberately **not** included: Smart List / task-picking logic (Marvin's own
 Spotlight does the picking; the server gives your assistant hands, not
-opinions), and the `/reminder/deleteAll` endpoint — the one documented
-endpoint without a tool, deliberately: it wipes every reminder in a single
-call and `delete_reminder` already covers targeted cleanup.
+opinions), and two documented endpoints without a tool:
+`/reminder/deleteAll`, deliberately — it wipes every reminder in a single
+call and `delete_reminder` already covers targeted cleanup — and
+`/downloadAttachment` (attachments are not covered).
 
 Every tool carries [MCP tool annotations](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations)
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) so

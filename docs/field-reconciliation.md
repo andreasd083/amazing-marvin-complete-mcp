@@ -189,7 +189,7 @@ write) — documented in the descriptions as an orphan risk.
 | `labelIds` | supported | `create_task`, `update_task` |
 | `isStarred` | supported | `create_task` (`priority` -1/1–3), `set_priority` (-1/0–3) — -1 = Low priority (down arrow), verified 2026-08-30 |
 | `isFrogged` | supported | `create_task` (`frog`), `set_priority` — a 1–4 scale since 1.8.0: 1 = I dread this a little, 2 = I dread this, 3 = I dread this a lot, 4 = This might kill me (toxic); `false` = none (read 2026-10-09; level 4 read from a screenshot) |
-| `done`/`doneAt` | supported | `mark_done` (via `/markDone` — never `/doc/update`, MarvinAPI issue #6), `unmark_done`; reading via `get_done_items` (undocumented `/doneItems`, Level 4) |
+| `done`/`doneAt` | supported | `mark_done` (via `/markDone` — never `/doc/update`, MarvinAPI issue #6), `unmark_done`; reading via `get_done_items` (`/doneItems`, Level 4) |
 | `backburner` | supported | `create_task`, `update_task` — only effective on unscheduled tasks; day trumps the flag in the UI (verified in the app 2026-08-29) |
 | `isReward` | supported (discouraged) | `create_task` — documented Task field with no observed function: the app's purchasable rewards are separate `db="Rewards"` documents that the public API cannot reach (live-tested 2026-08-29: /rewards and variants 404, no rewards profile documents, app rewards are not Tasks); the flag produced no UI effect |
 | `rewardPoints` | supported | `create_task`, `update_task` — points the task AWARDS; coin + points in the list row with the Rewards strategy on (verified in the app 2026-08-29) |
