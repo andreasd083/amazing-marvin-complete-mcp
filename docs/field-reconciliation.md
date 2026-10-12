@@ -1,6 +1,7 @@
 # Field-by-field reconciliation against Marvin's data model
 
-A reconciliation (2026-08-29) of [Marvin Data Types](https://github.com/amazingmarvin/MarvinAPI/wiki/Marvin-Data-Types)
+A reconciliation (2026-08-29) of [Marvin Data Types](https://help.amazingmarvin.com/amazing-marvin/api-data-types)
+(then in the GitHub wiki; the documentation moved to the help center 2026-10-04)
 (the *Tasks* and *Categories (and projects)* sections) against this server's
 tools. All "live-tested 2026-08-29" claims were verified against the live
 API with throwaway test artifacts (created, verified, deleted).
@@ -27,9 +28,13 @@ Orbit view unless `noAutoOrbit` is set.
   "projects never render an own icon" was our test error. timeBlockSection was listed here until 2026-09-17: the "no visible
   section link" finding was our own test error (the day view was never
   grouped by time block) and is withdrawn — see the field row below.
-- Wiki corrections found: project timeEstimate is NOT aggregated with the
-  children's estimates in the UI; snoozed tasks are hidden from the
+- Wiki corrections found: snoozed tasks are hidden from the
   category view too (not just 'everywhere except the master list').
+  (Until 1.8.0 this list also said that a project's timeEstimate is NOT
+  aggregated with the children's estimates. That test was mis-designed — it
+  set estimates on both the project and its children. The aggregation
+  exists; the project's own estimate takes precedence, per Marvin support's
+  reply to our report.)
 - Project-only fields (day/dueDate/priority/isFrogged) written onto a
   category are silently accepted by the server (live-tested 2026-09-11).
   `update_category_or_project` blocks them anyway (type check since
@@ -183,7 +188,7 @@ write) — documented in the descriptions as an orphan risk.
 | `note` | supported | `create_task`, `update_task` |
 | `labelIds` | supported | `create_task`, `update_task` |
 | `isStarred` | supported | `create_task` (`priority` -1/1–3), `set_priority` (-1/0–3) — -1 = Low priority (down arrow), verified 2026-08-30 |
-| `isFrogged` | supported | `create_task` (`frog`), `set_priority` |
+| `isFrogged` | supported | `create_task` (`frog`), `set_priority` — a 1–4 scale since 1.8.0: 1 = I dread this a little, 2 = I dread this, 3 = I dread this a lot, 4 = This might kill me (toxic); `false` = none (read 2026-10-09; level 4 read from a screenshot) |
 | `done`/`doneAt` | supported | `mark_done` (via `/markDone` — never `/doc/update`, MarvinAPI issue #6), `unmark_done`; reading via `get_done_items` (undocumented `/doneItems`, Level 4) |
 | `backburner` | supported | `create_task`, `update_task` — only effective on unscheduled tasks; day trumps the flag in the UI (verified in the app 2026-08-29) |
 | `isReward` | supported (discouraged) | `create_task` — documented Task field with no observed function: the app's purchasable rewards are separate `db="Rewards"` documents that the public API cannot reach (live-tested 2026-08-29: /rewards and variants 404, no rewards profile documents, app rewards are not Tasks); the flag produced no UI effect |
@@ -197,11 +202,15 @@ write) — documented in the descriptions as an orphan risk.
 | `orbit`, `noAutoOrbit` | supported (update only) | `update_task` — undocumented in the wiki; orbit=true verified in the app 2026-08-29 (Orbit view + icon in Today). Auto-orbit pulls in scheduled tasks unless noAutoOrbit is set. **`/addTask` silently drops `noAutoOrbit`** (live-tested 2026-09-13: 200, the field is absent from both the echo and the stored document) — hence no create parameter; set it with update_task after creating |
 | `rewardId` | **unsupported** | no tool exposes Reward IDs to point at; set in the app |
 | `dependsOn` | **unsupported** | complex object shape (ID⇒bool) with dependency logic in the app; set in the app |
-| `subtasks` | **unsupported** | complex object shape; managed in the app |
+| `subtasks` | supported (1.8.0) | `create_task` (`subtasks`) and the recurring-task tools (`subtasks`, `subtasks_add`) — dotted keys `subtasks.<id>` = `{_id (13 characters), title, done, rank}`, plus `.done`/`.doneAt`/`.title`, stamped as `fieldUpdates.subtasks` (read 2026-10-09). Occurrences inherit them with a date prefix, `<day>_<subid>` (read) |
 | `rank`, `masterRank`, `dayRank` | **unsupported** | the app's sort bookkeeping — writing risks invisible/mis-sorted views |
 | `firstScheduled` | **unsupported** | the app's bookkeeping for the procrastination counter |
-| `taskTime`, `reminderTime`, `reminderOffset`, `snooze`, `autoSnooze`, `remindAt`, `reminder` | **unsupported (MCP choice, not a Marvin gap)** | task reminders require a double write kept in sync with the server-side entry — see the warning in `set_reminder`; set in the app. Facts (live data 2026-09-02): Time = a clock time on the day (`day` remains the only scheduling), creates no event/time block; with auto-created reminders enabled the app writes `reminderTime` = the clock time, `reminderOffset: 0`, snooze per settings + a server-side entry — Time and reminder are in practice the same thing. Reading works fully (the fields travel with the task; `get_reminders` lists the server-side entries) |
-| `isPinned`, `pinId`, `recurring`, `recurringTaskId`, `echo`, `echoId`, `generatedAt`, `echoedAt` | **unsupported** | recurrence/pinning machinery — never edited via the API (see the `update_task` warning) |
+| `taskTime`, `reminderTime`, `reminderOffset`, `snooze`, `autoSnooze`, `bugMeInterval`, `reminders` | supported (1.8.0) | clock time and own reminders written in the app's form, both fields and server entries (`set_reminder`/`delete_reminder` with a task); see *Reminders* under 1.8.0 below (read 2026-10-09 to 2026-10-11). Facts (live data 2026-09-02): Time = a clock time on the day (`day` remains the only scheduling), creates no event/time block; with auto-created reminders enabled the app writes `reminderTime` = the clock time, `reminderOffset: 0`, snooze per settings + a server-side entry — Time and reminder are in practice the same thing |
+| `remindAt`, `reminder` | **unsupported** | — |
+| `taskSize` | supported (1.8.0) | `size` on the task and project tools — XS–XL = 1–5, removed = `false`, absent when never set; `/addTask` drops the field, so it is written with `/doc/update` (read 2026-10-05; projects read 2026-10-09) |
+| `habitId`, `habitRepAt` | read and written (1.8.0) | `mark_done`/`unmark_done` on habit tasks; see *Habits* under 1.8.0 below |
+| `recurring`, `recurringTaskId`, `echo`, `echoId`, `generatedAt` | read; written only on the first after-completion occurrence (1.8.0) | see *Recurring tasks* and *Occurrences* under 1.8.0 below |
+| `isPinned`, `pinId`, `echoedAt` | **unsupported** | recurrence/pinning machinery — never edited via the API (see the `update_task` warning) |
 | `calId`, `calURL`, `etag`, `calData` | **unsupported** | calendar-sync internals |
 | `times`, `duration`, `firstTracked` | **unsupported** | time-tracking cache — the source of truth is the `/track` endpoints (`start_tracking` etc.) |
 | `g_in_*`, `g_sec_*`, `g_rank_*` | **unsupported** | dynamic goal-attachment keys; managed in the app |
@@ -217,7 +226,7 @@ write) — documented in the descriptions as an orphan risk.
 | `note` | supported | `create_category_or_project`, `update_category_or_project` |
 | `color` | supported | `create_category_or_project` (category only — `/addProject` ignores the field), `update_category_or_project` (both) |
 | `icon` | supported | as `color`; format = library-prefixed names ('lucide-Rocket', 'huge-happy') or emoji, API-set values render (verified in the app 2026-08-29). On projects the icon renders only when Master List → Configure View → 'Show Custom Icon On' includes projects: 'Categories & Projects' (verified 2026-08-31) or 'Just Projects' (verified 2026-09-18); the Main/All Categories modes are untested for subcategory icons. 'Projects NEVER render their own icon' was our test error, corrected 2026-09-18 |
-| `timeEstimate` | supported | `create_category_or_project`, `update_category_or_project` — the project's OWN estimate renders; no aggregation with the children's despite the wiki's claim (verified in the app 2026-08-29) |
+| `timeEstimate` | supported | `create_category_or_project`, `update_category_or_project` — the project's own estimate takes precedence; without one the project shows the sum of its children's (per Marvin support's reply to our report; our 2026-08-29 "no aggregation" was a mis-designed test, corrected in 1.8.0) |
 | `startDate` | supported (update only) | `update_category_or_project` — `/addProject` ignores the field (live-tested 2026-08-29) |
 | `endDate` | supported (update only) | as `startDate` |
 | `plannedWeek`, `plannedMonth` | supported | `create_category_or_project`, `update_category_or_project` |
@@ -230,10 +239,121 @@ write) — documented in the descriptions as an orphan risk.
 | `backburner` | supported (update only) | `update_category_or_project` — same condition as Tasks (unscheduled item) |
 | `type` | supported | `convert_category_or_project` (experimental — in-place conversion; no official endpoint) |
 | `orbit`, `noAutoOrbit` | supported (update only) | `update_category_or_project` — undocumented, see Tasks |
-| `done`, `doneDate` | **unsupported** | projects are completed in the app (`/markDone` rejects projects; `done` via `/doc/update` skips the app's side effects) |
+| `done`, `doneDate` | **`mark_project_done`** (1.8.0) | `/markDone` answers 400 on projects (tasks only). The tool writes the app's five fields in one stamped `/doc/update`: `done`, `doneAt` = `workedOnAt` = now, `day` = the project's day or today if it has none, `doneDate` = `day`. `dueDate` is not touched. The app refuses while children are open ("Mark subprojects/tasks done first"); the tool closes open tasks first, after a first step that lists them and returns a confirmation code. Done projects are missing from `/categories` (read, four cases). See *Completing projects* under 1.8.0 below |
 | `firstScheduled` | supported (update only) | `update_category_or_project` (`first_scheduled`) — for restoring the value from the convert tool's `removed_project_fields`; nothing backfills it when day is set via /doc/update, neither server nor app (verified 2026-08-29) |
 | `rank`, `dayRank` | **unsupported** | the app's sorting fields |
 | `recurring`, `recurringTaskId`, `echo` | **unsupported** | recurrence machinery |
 | `marvinPoints`, `mpNotes` | system fields | written by the server on completion |
 | `sprintId` | **unsupported** | "Not used yet" per the wiki |
 | `updatedAt`, `workedOnAt`, `_id`, `_rev`, `db` | system fields | — |
+
+## 1.8.0 — recurring tasks, notebooks, reminders, habits, completing projects
+
+Facts behind the 1.8.0 tools, gathered against the live API and the app
+between 2026-10-05 and 2026-10-12. Every fact carries its level: **read**
+(read from the API, a log or the app's data), **verified in the app**,
+**derived** (inferred, not observed directly) or **untested**.
+
+**Sources read before building** (help center pages, `dateModified` in UTC):
+[API changelog](https://help.amazingmarvin.com/amazing-marvin/api-changelog) 2026-10-05,
+[API endpoints](https://help.amazingmarvin.com/amazing-marvin/api-endpoints) 2026-10-06,
+[Data types](https://help.amazingmarvin.com/amazing-marvin/api-data-types) 2026-10-04,
+[Recurrence, saved and pinned items (data)](https://help.amazingmarvin.com/amazing-marvin/api-recurrence) 2026-10-04,
+[Getting started with the Marvin API](https://help.amazingmarvin.com/amazing-marvin/api-getting-started) 2026-10-06,
+[Recurring Tasks](https://help.amazingmarvin.com/amazing-marvin/recurring-tasks-feature) 2026-10-04,
+[Stop recurring tasks from piling up](https://help.amazingmarvin.com/amazing-marvin/stop-recurring-tasks-from-piling-up) 2026-10-02,
+[Notebooks](https://help.amazingmarvin.com/amazing-marvin/notebooks) 2026-10-04,
+[Notebooks and Day Notes](https://help.amazingmarvin.com/amazing-marvin/notebooks-and-day-notes) 2026-10-08,
+[Habits](https://help.amazingmarvin.com/amazing-marvin/habits) 2026-10-06,
+[Adding habits and showing them as tasks](https://help.amazingmarvin.com/amazing-marvin/adding-habits-and-showing-them-as-tasks) 2026-10-04,
+[Duration estimates](https://help.amazingmarvin.com/amazing-marvin/duration-estimates) 2026-10-06,
+[Undo and the Trash](https://help.amazingmarvin.com/amazing-marvin/undo-and-the-trash) 2026-10-11
+(new paragraph: "Deleting a project — When you delete a project, Marvin
+shows what will be deleted with it and asks you to confirm."), and the two
+weekday articles ([every week day](https://help.amazingmarvin.com/amazing-marvin/how-to-set-up-a-recurring-task-for-every-week-day),
+[Mo–Fr](https://help.amazingmarvin.com/amazing-marvin/how-to-set-a-task-to-be-done-during-weekdays-eg-mo-fr)).
+The app's public What's New ends at 1.67.1; no newer app version was known
+(untested).
+
+### Recurring tasks (`db: RecurringTasks`)
+
+| Field | Status | Tool / source |
+|---|---|---|
+| `type` | supported | `create_recurring_task`/`update_recurring_task` (`repeat`): `daily`, `weekly`, `monthly`, `n per week` (`x_times_per_week`), `repeat` (`every_x_days`), `echo` (`after_completion`), `repeat week`, `repeat month`, `repeat year` (`every_x_weeks`/`_months`/`_years`), `onOff` (`on_off`), `custom` — all eleven display correctly in the app's dialog (verified in the app) |
+| `day` (0 = Sunday), `date`, `weekDays`, `repeat`, `echoDays`, `onCount`, `offCount`, `customRecurrence` | supported | the type's sub-fields; After completion writes `repeat` = `echoDays` (read). `customRecurrence` is written only as an RRULE string (`RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=FR`); rules in words are refused by the tools, because the app did not reliably understand them (e.g. "every other friday") |
+| `createAhead` | supported | `create_occurrences`: 0/1/3/7/14/30; a missing field = the account's default (read); changing back to the default writes `null`, which the app reads as the account's default (read) |
+| `missedMode` | supported | `if_you_miss_one`: `""` (default) / `stack` (keep them all) / `carry` (keep just one) / `skip` (only the current one) (read); `get_today_items`/`get_due_items` filter on it |
+| `limitToWeekdays` | supported | `only_weekdays`, only for the types the dialog offers it on. A month day on a weekend moves to Friday (documented for monthly/repeat month; read); `every_x_days` then counts in weekdays (derived from one series; undocumented). The occurrence clean-up in `update_recurring_task` only lists, never deletes |
+| `dueIn`, `repeatStart`, `endDate`, `dailySection`, `bonusSection` | supported | `hard_deadline_days`, `starts_on`, `ends_on`, `daily_section`, `bonus_section` (read) |
+| `labelIds`, `isStarred`, `taskSize`, `note`, `subtasks` | supported | properties of the recurring task; inheritance to occurrences created via the API read (also `dailySection`, `bonusSection`, and `dueIn` → `dueDate`) |
+| `deletedDates` | written | ISO dates; deleting one occurrence adds its day here, as the app's *Just this one* does (read). The clean-up in `update_recurring_task` does not write it (read) |
+| `parentId` | supported | moving it; the next occurrence lands in the new place (read) |
+
+### Occurrences
+
+| Field | Status | Source |
+|---|---|---|
+| `_id` = `YYYY-MM-DD_<recurring task id>` | read | after-completion occurrences created by ticking one off get a random id (read) |
+| `generatedAt`, `fieldUpdates` | read | "unchanged" = no stamp later than `generatedAt` + 60 s except `masterRank`/`dueDate`/`updatedAt`, and `day` = the date in the id (read) |
+| `echo`, `echoId` | written on the first after-completion occurrence | `echo: true`, `echoId: null` (read); the next occurrence after `/markDone` = day + `echoDays`; for an occurrence dated in the future the tool first moves it to today, as the app does (read) |
+| `subtasks` | written on the first after-completion occurrence | id `<day>_<subid>` (read) |
+
+### Notebooks (`db: Notebooks`) and pages (`db: Pages`)
+
+| Field | Status | Source |
+|---|---|---|
+| Notebooks: `_id` (`nb_…`), `title`, `parentId`, `parentType`, `rank`, `sections` (`[{id: 'sec_…', title, rank}]`) | supported | sections are rewritten as a whole list (read); renaming only on standalone notebooks (a product decision) |
+| Pages: `_id` (`pg_…`), `notebookId`, `sectionId`, `rank`, `title`, `note`, `hasBody`, `titleAuto` | supported | create, change, move, delete (read) |
+| Pages: `originalNoteFrom`, `migratedAt` | written when moved to a parent that has a note | the app's *YOUR ORIGINAL NOTE* marker (verified in the app); a parent without a note gets no Notes page (read) |
+| Project/category: `notebookId`, `notePageId` | read | computed by the server from the page with the lowest `rank`; `note` writes to that page, or creates page 1 if the notebook is empty (read) |
+
+### Reminders
+
+| Part | Shape | Source |
+|---|---|---|
+| Clock time | `taskTime` "HH:MM", title prefix, `reminderTime` (seconds), `reminderOffset` 0, `snooze` 5, `autoSnooze` false, `bugMeInterval` 0; server entry of type **T** with `reminderId` = the task's id, `taskId: ""` | read |
+| Own reminder | `reminders: [{reminderId (13 characters), time (s)}]` + a server entry of type **M** with `taskId` | read |
+| Completion | the app removes T and M on the server and clears `reminderTime`; the `reminders` list stays | read |
+| Deletion | clear the fields, `/reminder/delete` T and M, then delete — otherwise an open client still reminds | read |
+| New day / new clock time | T and `reminderTime` move, M stays (also *before* choices, which are stored as an absolute time) | read |
+| Day removed | the clock-time fields and `autoSnoozeChosen`/`remind` = null, T removed, M stays | read |
+| Undone completion | T is not put back; M still notifies | read |
+
+### Habits
+
+| Field | Behavior | Source |
+|---|---|---|
+| `history` (the habit) | `[time, value, …]`; the app's tick-off records 12:00 on the task's `day` | read |
+| `recordType: number`, `target` | values are summed per day; the task is ticked off when the target is reached | read |
+| `habitRepAt` (the task) | the recording's time; set by `mark_done` | read |
+| `/updateHabit` `undo` | always removes the LATEST entry; with `time`, `[time, 0]` is appended as well — never send `time` with `undo`, and compare the last entry with `habitRepAt` first | read |
+| Partial recording (below the target) | the app writes nothing on the task, neither on recording nor on undo (Ctrl+Z removes the habit's last entry); `habitRepAt` stays null — `unmark_done` therefore writes nothing on an open habit task | read 2026-10-11 |
+
+### Completing projects
+
+| Finding | Behavior | Level |
+|---|---|---|
+| Project completed in the app, no day | `day` today, `doneDate` today, `doneAt` = `workedOnAt`, a set `dueDate` stays | read 2026-10-12 |
+| Project completed in the app, day in the past/future | `day` stays, `doneDate` = `day` (also in the future), `dueDate` "" stays | read 2026-10-12 |
+| `fieldUpdates` on completion | stamped for `done`, `doneAt`, `doneDate`, `day`, `workedOnAt`, also when `day` does not change; `_rev` 2 = one write | read (three cases) |
+| `dueDate` "" | became null in one test but stayed "" in two others — difference unexplained; the tool does not touch the field | read, cause untested |
+| `/markDone` and `workedOnAt` on the children | the app sets `workedOnAt` on the children; `/markDone` sets no `workedOnAt` and stamps no `fieldUpdates` — a known deviation, stated in the tool descriptions | read |
+| `/children` and reminder fields | the children's documents in `/children` carry `reminders`/`reminderTime`; `mark_project_done` cleans up their server entries from them | read (one case) |
+| Deleting a project in the app | the app shows what will be deleted with the project and asks for confirmation (help article above); `delete_task` instead refuses while children are open | read in the article; what the app deletes with the project untested |
+| `unmark_done` on a project/category | refuses without writing (a product decision) | read in the code and tests |
+
+### Further findings
+
+| Finding | Behavior | Level |
+|---|---|---|
+| `GET /notebook?parentId=` | 404 "Notebook not found" 5 and 12 s after the notebook was created with `/doc/create`, while `?id=` answered 200 at the same time. Later 200 for the same call on a project and a category. Cause untested. `get_notebook` then returns an error suggesting `notebook_id` (no fallback) | read (log 2026-10-11) |
+| `get_notebook` with `page_id` | returns that single page | read in the code |
+| `GET /doc` on a deleted document | 200 with `{"error":"not_found","reason":"deleted"}`, not 404 | read 2026-10-11 |
+| Project deleted in the app with its notes | the project is deleted from the database; its notebook and page remain and are listed by `/notebooks` and `/notebook?parentId=` | read 2026-10-11 |
+| `/categories` | lists no documents with `done: true` (64 documents, 2026-10-11) | read |
+| `get_notebooks`, `search_notebooks` | `parent_missing` when the parent is absent from `/categories` and `/doc` answers `not_found`; `parent_done` when the parent is a done project | `deleted` read 2026-10-11; `/categories` not listing a done project read |
+| `/markDone` on a task without a day | the server sets `day` to today without a `fieldUpdates` stamp; the app's undo writes `day: null` with a stamp and leaves `doneAt`. `unmark_done` does the opposite (the day stays, `doneAt` is cleared) | read |
+| Task created without a day (`create_task`) | `day` and `firstScheduled` "unassigned", no `fieldUpdates` in the response; `update_task` with a day stamps `fieldUpdates.day` but leaves `firstScheduled` "unassigned" | read |
+| `unmark_done` and `day` | clears `day` only when `firstScheduled` is "unassigned", `fieldUpdates.day` is missing and the task is not an occurrence; otherwise the day stays | rule derived; the full chain (never a day → `mark_done` → `unmark_done`) untested |
+| `unmark_done` and `doneAt` | still cleared, although the app's undo leaves the field — a deliberate deviation | read; the effect in the app untested |
+| The rate limiter | creates (`/addTask`, `/addProject`, `/addEvent`, `/doc/create`) are spaced 1.1 s, everything else 3.1 s, per the documentation's "No bursts faster than 1 request every 3 seconds". The spacing is set by the kind of the upcoming call: only a create after the previous call gets 1.1 s (an earlier version keyed it on the previous call, so a `/doc/update` went out 1.1 s after an `/addTask`) | read (Getting started, the log and the code) |

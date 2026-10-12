@@ -72,13 +72,13 @@ async def test_midnight_rollover_resets_budget_mid_queue(monkeypatch):
     limiter._count_date = "2026-08-25"
     limiter._count = ratelimit.DAILY_LIMIT - 1
 
-    await limiter.acquire(is_write=True)  # last allowed call of the old day
+    await limiter.acquire(is_create=True)  # last allowed call of the old day
     assert limiter._count == ratelimit.DAILY_LIMIT
     with pytest.raises(DailyBudgetExceeded):
-        await limiter.acquire(is_write=True)
+        await limiter.acquire(is_create=True)
 
     day[0] = "2026-08-26"  # midnight passes while callers are queued
-    await limiter.acquire(is_write=True)  # now allowed again
+    await limiter.acquire(is_create=True)  # now allowed again
     assert limiter._count == 1
     assert limiter._count_date == "2026-08-26"
 

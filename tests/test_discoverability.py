@@ -1,8 +1,13 @@
-"""Discoverability: first-line form rule, overview coverage, instructions, no titles."""
+"""Discoverability: first-line form rule, overview coverage, instructions, no titles.
+Length cap: Claude Code truncates tool descriptions and server instructions at
+2,048 characters (since v2.1.280)."""
 
 import re
 
 from marvin_mcp import server
+
+# Claude Code's per-server cap since v2.1.280; longer text is silently truncated.
+MAX_DESCRIPTION = 2048
 
 ABBREV = re.compile(r"\b(e\.g|i\.e|etc|incl|vs)\.$")
 
@@ -38,3 +43,13 @@ async def test_instructions_point_to_list_capabilities():
 async def test_no_tool_carries_title():
     tools = await _tools()
     assert all(t.title is None for t in tools.values()), [n for n, t in tools.items() if t.title]
+
+
+async def test_descriptions_fit_claude_code_cap():
+    tools = await _tools()
+    long = {n: len(t.description or "") for n, t in tools.items() if len(t.description or "") > MAX_DESCRIPTION}
+    assert not long, long
+
+
+async def test_instructions_fit_claude_code_cap():
+    assert len(server.INSTRUCTIONS) <= MAX_DESCRIPTION, len(server.INSTRUCTIONS)

@@ -2,7 +2,7 @@
 
 - Least-privilege token routing: `X-Full-Access-Token` is only sent to the
   endpoints that require it (/doc*, /habits?raw=1, GET /reminders,
-  /resetRewardPoints); everything else uses the limited `X-API-Token`.
+  /resetRewardPoints, /notebooks, /notebook); everything else uses the limited `X-API-Token`.
 - Every call goes through the global rate limiter.
 - Never logs headers, tokens, or request bodies.
 """
@@ -31,7 +31,14 @@ FULL_ACCESS_ENDPOINTS = {
     "/doc/delete",
     "/reminders",
     "/resetRewardPoints",
+    "/notebooks",
+    "/notebook",
 }
+
+
+# Creating calls use the limiter's shorter spacing (1.1 s); everything else
+# waits 3.1 s.
+CREATE_ENDPOINTS = frozenset({"/addTask", "/addProject", "/addEvent", "/doc/create"})
 
 
 class MarvinError(Exception):
@@ -107,14 +114,14 @@ class MarvinClient:
         *,
         params: dict | None = None,
         json: Any | None = None,
-        is_write: bool | None = None,
+        is_create: bool | None = None,
         force_full_access: bool = False,
         expect_json: bool = True,
         extra_headers: dict | None = None,
     ) -> Any:
-        if is_write is None:
-            is_write = method.upper() != "GET"
-        await self._limiter.acquire(is_write=is_write)
+        if is_create is None:
+            is_create = endpoint in CREATE_ENDPOINTS
+        await self._limiter.acquire(is_create=is_create)
         headers = self._headers_for(endpoint, force_full_access=force_full_access)
         if extra_headers:
             headers = {**headers, **extra_headers}
@@ -212,6 +219,14 @@ class MarvinClient:
 
     async def delete_doc(self, item_id: str) -> Any:
         return await self.request("POST", "/doc/delete", json={"itemId": item_id})
+
+    async def notebooks(self) -> list:
+        # Notebooks require the Full Access token.
+        return await self.request("GET", "/notebooks")
+
+    async def notebook(self, notebook_id: str | None = None, parent_id: str | None = None) -> Any:
+        params = {"id": notebook_id} if notebook_id else {"parentId": parent_id}
+        return await self.request("GET", "/notebook", params=params)
 
     async def today_items(self, date: str | None = None) -> list:
         return await self.request(

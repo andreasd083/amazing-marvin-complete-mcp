@@ -17,8 +17,8 @@ from marvin_mcp import ratelimit
 @pytest.fixture(autouse=True)
 def fast_ratelimit(monkeypatch):
     """Short intervals in tests so they run fast; the logic is the same."""
-    monkeypatch.setattr(ratelimit, "READ_INTERVAL_S", 0.02)
-    monkeypatch.setattr(ratelimit, "WRITE_INTERVAL_S", 0.01)
+    monkeypatch.setattr(ratelimit, "CALL_INTERVAL_S", 0.02)
+    monkeypatch.setattr(ratelimit, "CREATE_INTERVAL_S", 0.01)
 
 
 @pytest.fixture

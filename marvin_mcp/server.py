@@ -1,7 +1,7 @@
 """MCP server for Amazing Marvin with complete public-API coverage.
 
-38 tools covering all ~31 documented public endpoints (plus the undocumented
-/doneItems): core CRUD + priority,
+50 tools covering all ~31 documented public endpoints (plus the undocumented
+/doneItems): core CRUD + priority, recurring tasks, notebooks,
 habits, time blocks (read + experimental create), time tracking, labels,
 goals, reminders, and kudos/reward points. Deliberately no Smart List /
 task-picking logic — Marvin's own Spotlight does the picking.
@@ -17,6 +17,7 @@ of the README for the full list.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import time
@@ -27,27 +28,33 @@ from typing import Annotated, Any, Literal
 from fastmcp import FastMCP
 from pydantic import Field
 
+from . import chain as chainmod
+from . import taskreminders as tr
+from .chain import Chain, ChainError
 from .client import MarvinClient, MarvinError, local_today
 from .config import TIMEZONE, Settings, load_settings
+from .notes import protect_markdown, protection_note
 from .ratelimit import DailyBudgetExceeded, QueueTimeout, RateLimiter
 
 logger = logging.getLogger(__name__)
 
 INSTRUCTIONS = (
-    "Amazing Marvin MCP — 38 tools. Areas: tasks (create/update/mark_done/"
-    "delete_task, set_priority, get_today/due/done_items), structure (get_categories, "
-    "get_children, create/update/convert_category_or_project, get_labels), habits "
-    "(list_habits, get_habit, record_habit), time (get_today_time_blocks, "
-    "create_time_block, start/stop_tracking, get_tracked_item, get_time_tracks), "
-    "rewards (get_kudos, claim/unclaim/spend/reset_reward_points), reminders "
-    "(get/set/delete_reminder), goals (get_goals), account (get_account_info, "
-    "test_connection, get_rate_limit_status), calendar (create_event). "
-    "NOT possible via MCP but possible in the app: a time/reminder on a task "
-    "(taskTime), recurrence rules, startDate at creation (set it with update_task "
-    "afterwards), completing projects. Labels can be set on both categories and "
-    "projects (update_category_or_project). Call list_capabilities for the full map "
-    "with can/cannot per tool before assuming something is impossible. "
-    "Marvin budget ~60 calls/hour, 1440/day."
+    "Amazing Marvin MCP — 50 tools. Areas: tasks (create/update/mark_done/"
+    "unmark_done/delete_task, mark_project_done, set_priority, get_today/due/done_items; size, "
+    "subtasks, times and reminders in the app's form), recurring tasks "
+    "(create/update_recurring_task), notebooks (get_notebooks, get_notebook, "
+    "search_notebooks, create/update/delete_notebook, create/update/"
+    "delete_notebook_page), structure (get_categories, get_children, create/update/"
+    "convert_category_or_project, get_labels), habits (list_habits, get_habit, "
+    "record_habit), time (get_today_time_blocks, create_time_block, start/"
+    "stop_tracking, get_tracked_item, get_time_tracks), rewards (get_kudos, "
+    "claim/unclaim/spend/reset_reward_points), reminders (get/set/delete_reminder), "
+    "goals (get_goals), account (get_account_info, test_connection, get_rate_limit_status), "
+    "calendar (create_event). Cannot via MCP but in the app: create habits, labels "
+    "and goals. Notes: bullets with '*', checklists with '- [ ]'. "
+    "Call list_capabilities for the full map with can/cannot per tool before "
+    "assuming something is impossible. Marvin budget: 1440 calls/day, at most one "
+    "call every three seconds."
 )
 
 mcp: FastMCP = FastMCP(name="amazing-marvin", instructions=INSTRUCTIONS)
@@ -60,6 +67,8 @@ _limiter: RateLimiter | None = None
 # times a day and a cold run costs lookback+1 read calls.
 DONE_CACHE_TTL_S = 30 * 60
 _done_cache: dict[tuple[str, int], tuple[float, dict]] = {}
+# Modules with their own caches (tools_notebooks) register their reset here.
+RESET_HOOKS: list = []
 
 
 def get_client() -> MarvinClient:
@@ -74,6 +83,9 @@ def init(settings: Settings, transport=None) -> None:
     _limiter = RateLimiter(state_file=settings.state_dir / "ratelimit-state.json")
     _client = MarvinClient(settings, _limiter, transport=transport)
     _done_cache.clear()
+    _missed_cache.clear()
+    for hook in RESET_HOOKS:
+        hook()
 
 
 def day_bounds_ms(date_str: str) -> tuple[float, float]:
@@ -189,7 +201,290 @@ def check_planned_month(value: str) -> None:
         raise MarvinError("planned_month must have the format YYYY-MM.") from None
 
 
+# ---------------------------------------------------------------- Helpers (task form)
+
+# Size (T-shirt): XS-XL is stored as taskSize 1-5, removed = false (read from
+# the app's data, 2026-10; projects use the same field).
+SIZES = {"XS": 1, "S": 2, "M": 3, "L": 4, "XL": 5}
+SizeArg = Literal["XS", "S", "M", "L", "XL", ""]
+
+FROG_DESC = (
+    "Dread/frog 1-4 (read in the app, 2026-10): 1=I dread this a little (A little), "
+    "2=I dread this (Dread), 3=I dread this a lot (A lot), 4=This might kill me "
+    "(Toxic — requires 'Enable toxic frog level' in the account; Simple mode shows only one level)"
+)
+
+TIME_DESC = (
+    "Clock time HH:MM (requires a day). Writes the app's form: taskTime, title prefix "
+    "'HH:MM ', reminderTime and a server entry of type T — the app reminds at that time. "
+    "'' removes the time (update_task)"
+)
+REMINDERS_DESC = (
+    "Own reminders: 'HH:MM' on the task's day, or 'before:N' = N minutes before "
+    "the clock time. Stored as the reminders list + one server entry of type M per reminder; "
+    "before values are saved as an absolute time, as in the app. Without a day, today applies"
+)
+
+
+def size_value(size: str) -> int | bool:
+    if size == "":
+        return False
+    return SIZES[size]
+
+
+def build_setters(fields: dict[str, Any], raw: list[dict] | None = None) -> list[dict]:
+    """Like make_setters, plus raw setters (dotted keys for subtasks).
+    Raw keys under subtasks.* are stamped as fieldUpdates.subtasks (the
+    app's form when a subtask is added)."""
+    ts = now_ms()
+    setters: list[dict] = []
+    for key, val in fields.items():
+        setters.append({"key": key, "val": val})
+        setters.append({"key": f"fieldUpdates.{key}", "val": ts})
+    for s in raw or []:
+        setters.append(s)
+    if any(str(s["key"]).startswith("subtasks.") for s in raw or []):
+        setters.append({"key": "fieldUpdates.subtasks", "val": ts})
+    setters.append({"key": "updatedAt", "val": ts})
+    return setters
+
+
+def subtask_setters(
+    existing: dict | None,
+    add: list[str] | None = None,
+    done_ids: list[str] | None = None,
+    rename: dict[str, str] | None = None,
+) -> list[dict]:
+    """Subtasks with dotted keys: {_id (13 characters), title, done, rank},
+    ranked after the existing ones."""
+    existing = existing or {}
+    setters: list[dict] = []
+    ranks = [v.get("rank") or 0 for v in existing.values() if isinstance(v, dict)]
+    rank = max(ranks + [0])
+    for title in add or []:
+        rank += 1
+        sid = tr.rid13()
+        setters.append({"key": f"subtasks.{sid}", "val": {"_id": sid, "title": clean_title(title), "done": False, "rank": rank}})
+    ts = now_ms()
+    for sid in done_ids or []:
+        if sid not in existing:
+            raise MarvinError(f"Subtask {sid!r} does not exist on the task.")
+        setters.append({"key": f"subtasks.{sid}.done", "val": True})
+        setters.append({"key": f"subtasks.{sid}.doneAt", "val": ts})
+    for sid, title in (rename or {}).items():
+        if sid not in existing:
+            raise MarvinError(f"Subtask {sid!r} does not exist on the task.")
+        setters.append({"key": f"subtasks.{sid}.title", "val": clean_title(title)})
+    return setters
+
+
+def is_instance(doc: dict) -> bool:
+    return bool(doc.get("recurring") or doc.get("recurringTaskId"))
+
+
+def protected(note: str | None, notes: list[str]) -> str | None:
+    text, changed = protect_markdown(note)
+    msg = protection_note(changed)
+    if msg:
+        notes.append(msg)
+    return text
+
+
+def child_kind(doc: dict) -> str:
+    """A child's kind in mark_project_done and delete_task: only 'task' is closed."""
+    if doc.get("db") == "Categories":
+        return doc.get("type") or "category"
+    if doc.get("habitId"):
+        return "habit_task"
+    if is_instance(doc):
+        return "occurrence"
+    return "task"
+
+
+def child_summary(doc: dict) -> dict:
+    return {"id": doc.get("_id"), "title": doc.get("title"), "kind": child_kind(doc)}
+
+
+def iso_day(value: Any) -> str | None:
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return value
+    return None
+
+
+async def read_doc(c: Chain, item_id: str, label: str = "read the document") -> dict:
+    doc = await c.step(label, lambda: get_client().get_doc(item_id))
+    return doc if isinstance(doc, dict) else {}
+
+
+def day_noon_ms(day: str) -> int:
+    """12:00 on the day — the app's time for a habit record."""
+    dt = datetime.strptime(day, "%Y-%m-%d").replace(hour=12, tzinfo=TIMEZONE)
+    return int(dt.timestamp() * 1000)
+
+
+async def clear_task_reminders(c: Chain, doc: dict, item_id: str, *, clear_list: bool) -> list[str]:
+    """Clean up server entries T (the task's id) and M (ids from reminders)
+    and clear reminderTime; the reminders list is cleared only when
+    clear_list (deletion). Returns the ids removed on the server."""
+    if not tr.has_reminder_state(doc):
+        return []
+    fields: dict[str, Any] = {"reminderTime": None}
+    if clear_list:
+        fields["reminders"] = []
+    await c.step("clear the reminder fields", lambda: get_client().update_doc(item_id, make_setters(fields)))
+    ids = [item_id] + tr.reminder_ids_of(doc)
+    await c.step("remove the server entries", lambda: get_client().delete_reminders(ids))
+    return ids
+
+
+async def write_time_and_reminders(
+    c: Chain, item_id: str, title: str, day: str | None, time_hhmm: str | None, reminders: list[str] | None,
+    existing_doc: dict | None = None, result_box: dict | None = None,
+) -> tuple[dict, list[str]]:
+    """Fields + server entries for a clock time and own reminders in the app's form.
+    time_hhmm None = untouched, '' = remove. reminders None = untouched, [] = remove all."""
+    doc = existing_doc or {}
+    notes: list[str] = []
+    fields: dict[str, Any] = {}
+    posts: list[dict] = []
+    delete_ids: list[str] = []
+    cur_title = title
+    task_time = doc.get("taskTime") or None
+    if time_hhmm is not None:
+        if time_hhmm == "":
+            fields.update(tr.cleared_time_fields(cur_title))
+            delete_ids.append(item_id)
+            task_time = None
+            notes.append("Clock time removed in the app's form; own reminders remain.")
+        else:
+            tr.check_time(time_hhmm)
+            if not day:
+                raise MarvinError("A clock time requires a day — provide day (Time requires a day in the app).")
+            fields.update(tr.time_fields(day, time_hhmm, cur_title))
+            posts.append(tr.server_t(item_id, fields["title"], fields["reminderTime"]))
+            task_time = time_hhmm
+            own = doc.get("reminders") or []
+            if own and reminders is None:
+                notes.append(
+                    "Own reminders (including 'X min before') keep their absolute time when the clock time "
+                    f"changes, as in the app: {[r.get('time') for r in own]}."
+                )
+        cur_title = fields.get("title", cur_title)
+    if reminders is not None:
+        rday = day or local_today()
+        delete_ids.extend(tr.reminder_ids_of(doc))
+        new_list = []
+        for spec in reminders:
+            t = tr.resolve_reminder(spec, rday, task_time)
+            rid = tr.rid13()
+            new_list.append({"reminderId": rid, "time": t})
+            posts.append(tr.server_m(item_id, rid, cur_title, t))
+        fields["reminders"] = new_list
+        if not day:
+            notes.append("The task has no day: the app also shows the reminder's time under Time.")
+    if fields:
+        written = await c.step("write clock time and reminders", lambda: get_client().update_doc(item_id, make_setters(fields)))
+        if result_box is not None:
+            result_box["doc"] = written
+    if delete_ids:
+        await c.step("remove old server entries", lambda: get_client().delete_reminders(delete_ids))
+    if posts:
+        await c.step("write server entries", lambda: get_client().set_reminders(posts))
+    return fields, notes
+
+
+# Filter for hidden occurrences (If you miss one). There is no bulk read of
+# recurring tasks (/recurringTasks and similar return 404, verified against
+# the live API, 2026-10), so the mode is read per recurring task with /doc —
+# but only for recurring tasks with an open occurrence before today, the only
+# ones that can be hidden. The cache is valid until local midnight (the
+# configured timezone, MARVIN_TIMEZONE) and is cleared at once when this
+# server itself writes the recurring task (invalidate_missed_mode). Changes
+# made in the app therefore take effect by the next day at the latest.
+_missed_cache: dict[str, tuple[str, str]] = {}  # gid -> (day, missedMode)
+
+
+def invalidate_missed_mode(gen_id: str | None) -> None:
+    if gen_id:
+        _missed_cache.pop(gen_id, None)
+
+
+async def missed_modes(gen_ids: set[str]) -> tuple[dict[str, str], list[str], int]:
+    """Returns (modes, failed ids, number of /doc reads)."""
+    modes: dict[str, str] = {}
+    failed: list[str] = []
+    reads = 0
+    today = local_today()
+    for gid in sorted(gen_ids):
+        hit = _missed_cache.get(gid)
+        if hit and hit[0] == today:
+            modes[gid] = hit[1]
+            continue
+        reads += 1
+        try:
+            gen = await get_client().get_doc(gid)
+        except (MarvinError, DailyBudgetExceeded, QueueTimeout):
+            failed.append(gid)
+            continue
+        mode = (gen.get("missedMode") or "") if isinstance(gen, dict) else ""
+        _missed_cache[gid] = (today, mode)
+        modes[gid] = mode
+    return modes, failed, reads
+
+
+def hidden_occurrences(items: list, modes: dict[str, str], target: str, kind: str) -> set[str]:
+    """Ids of occurrences the app hides: carry shows the oldest open one,
+    skip (day view only) shows the date's own (as the app does)."""
+    by_gen: dict[str, list[dict]] = {}
+    for it in items:
+        if isinstance(it, dict) and it.get("recurringTaskId") and not it.get("done"):
+            by_gen.setdefault(it["recurringTaskId"], []).append(it)
+    hidden: set[str] = set()
+    for gid, occ in by_gen.items():
+        mode = modes.get(gid)
+        if mode == "carry" and len(occ) > 1:
+            occ_sorted = sorted(occ, key=lambda o: str(o.get("day")))
+            hidden.update(str(o.get("_id")) for o in occ_sorted[1:])
+        elif mode == "skip" and kind == "today":
+            hidden.update(str(o.get("_id")) for o in occ if o.get("day") != target)
+    return hidden
+
+
+async def filtered_listing(items: list, target: str, kind: str, include_hidden: bool, head: dict) -> dict:
+    today = local_today()
+    gen_ids = {
+        it["recurringTaskId"] for it in items
+        if isinstance(it, dict) and it.get("recurringTaskId") and not it.get("done")
+        and isinstance(it.get("day"), str) and it["day"] < today
+    }
+    modes, failed, reads = await missed_modes(gen_ids) if gen_ids else ({}, [], 0)
+    logger.debug("Filter %s: %d recurring-task reads (%d candidates)", kind, reads, len(gen_ids))
+    hidden = hidden_occurrences(items, modes, target, kind)
+    shown = items if include_hidden else [it for it in items if str(it.get("_id")) not in hidden]
+    out: dict[str, Any] = {**head, "count": len(shown), "items": shown, "hidden_count": len(hidden)}
+    if hidden:
+        out["hidden"] = [
+            {"id": it.get("_id"), "title": it.get("title"), "day": it.get("day")}
+            for it in items if str(it.get("_id")) in hidden
+        ]
+        out["hidden_included"] = include_hidden
+    if any(m == "" for m in modes.values()):
+        out["assumption"] = "Recurring tasks using the account default ('Use my default') are assumed to be Keep them all and are not filtered."
+    if failed:
+        out["filter_warning"] = (
+            f"The mode could not be read for {len(failed)} recurring task(s); their occurrences are shown "
+            "rather than hidden (unfiltered)."
+        )
+    out["recurring_reads"] = reads
+    habit_ids = [it.get("_id") for it in shown if isinstance(it, dict) and it.get("habitId")]
+    if habit_ids:
+        out["habit_task_ids"] = habit_ids
+    return out
+
+
 def tool_error(exc: Exception) -> dict:
+    if isinstance(exc, ChainError):
+        return exc.as_dict()
     if isinstance(exc, (DailyBudgetExceeded, QueueTimeout, MarvinError)):
         return {"error": str(exc)}
     logger.exception("Unexpected error")
@@ -251,10 +546,15 @@ async def create_task(
         int | None,
         Field(description="Priority (isStarred): 3=Most important/red, 2=Very important/orange, 1=Important/yellow, -1=Low priority (down arrow; shown in the app only with 'Enable low priority' on in the Priorities strategy — the value is stored regardless). 0 is not valid here; omit for no priority", ge=-1, le=3),
     ] = None,
-    frog: Annotated[
-        int | None, Field(description="Frog marker 1=normal, 2=baby, 3=monster", ge=1, le=3)
+    frog: Annotated[int | None, Field(description=FROG_DESC, ge=1, le=4)] = None,
+    note: Annotated[str | None, Field(description="Note (markdown; '- ' at line start is written as '* ', see list_capabilities.note_format)")] = None,
+    size: Annotated[
+        SizeArg | None,
+        Field(description="Size XS/S/M/L/XL (taskSize 1-5). XS and XL can be disabled in the account. Written with /doc/update after creation (/addTask drops the field)"),
     ] = None,
-    note: Annotated[str | None, Field(description="Note (markdown)")] = None,
+    subtasks: Annotated[list[str] | None, Field(description="Subtasks (titles), written after creation")] = None,
+    time: Annotated[str | None, Field(description=TIME_DESC)] = None,
+    reminders: Annotated[list[str] | None, Field(description=REMINDERS_DESC)] = None,
     label_ids: Annotated[list[str] | None, Field(description="Label IDs (from get_labels)")] = None,
     due_date: Annotated[str | None, Field(description="Deadline YYYY-MM-DD (use sparingly)")] = None,
     time_estimate_minutes: Annotated[
@@ -298,33 +598,17 @@ async def create_task(
         Field(description="Time block ID (from get_today_time_blocks, or time_block_id from create_time_block). Points the task at a time block; the task then appears under that block's section in Today. Three conditions (verified in the app 2026-09-17, 1.70.0.0, PWA + desktop): (1) the Time Block Sections strategy is on, (2) the day view is grouped by time block (Group by → Group by time block section — set per device, not synced; help article 1950243), (3) the task is scheduled on the block's day (day ≤ that date) — an unscheduled task with the field set is stored but does not appear in Today at all. Without (2) no sections render and the field looks inert. The field is sufficient on its own: the block needs no label/category/smart list, and blocks from create_time_block behave like blocks created in the app. The block's own Smart Time Block mapping (label/category) is a second, independent route that catches matching tasks without this field. The section shows before the block's start time (after its end: untested). The field is not exposed in the app's task settings — the app sets it when a task is added directly inside a block section"),
     ] = None,
 ) -> dict:
-    """Create a task with category, day, priority, labels, estimate, sections.
-    Prefer priority/frog over dates
-    where possible.
-
-    The title is stored verbatim: this tool disables the server's shortcut
-    parsing (X-Auto-Complete: false, verified against the live API
-    2026-08-20), so quick-add syntax like '#Category', '~15', '+YYYY-MM-DD'
-    and '*p2' is NOT parsed — '#' in titles (e.g. ticket references) is
-    therefore safe. Without this, every '#word' would corrupt the task (the
-    string is stored unresolved as parentId, making the task invisible).
-    Use the parameters instead: parent_id, day, priority,
-    time_estimate_minutes, label_ids.
-
-    Note: startDate/endDate CANNOT be set here — /addTask ignores them
-    (verified against the live API 2026-08-29). Set them with update_task
-    after creation.
-    A clock time (Time/taskTime) on the task: fully possible in Marvin, but
-    it is set in the APP, not via this MCP — an MCP limitation, NOT a Marvin
-    limitation. A set Time automatically becomes (with auto-created
-    reminders enabled in the user's settings) a reminder at that time; the
-    task does NOT become an event and blocks no time (time blocking = time
-    blocks). The reason for the app route is the double-write sync — see
-    set_reminder.
-    Strategy-dependent fields (planned_week/month,
-    review_date, backburner, is_reward/reward_points, the sections) are
-    stored even when the strategy is disabled in the app — they just are
-    not shown in the UI then."""
+    """Create a task with category, day, priority, size, time and reminders.
+    The title is stored verbatim: the server's shortcut parsing is disabled
+    (X-Auto-Complete: false), so '#Category', '~15', '*m' and '*p2' are NOT
+    parsed — '#' in titles is safe. Use the parameters instead.
+    startDate/endDate are set with update_task afterwards (/addTask ignores them).
+    Size, subtasks, clock time and reminders are written in a second step
+    with /doc/update and /reminder/set in the app's form; if a step fails the
+    response says which ones were done (the task then already exists). A
+    clock time requires day. Strategy-dependent fields (planned_week/month,
+    review_date, backburner, reward_points, the sections) are stored even
+    when the strategy is off in the app."""
     try:
         data: dict[str, Any] = {"title": clean_title(title), "done": False}
         if parent_id:
@@ -338,8 +622,13 @@ async def create_task(
             data["isStarred"] = priority
         if frog is not None:
             data["isFrogged"] = frog
+        notes: list[str] = []
         if note:
-            data["note"] = note
+            data["note"] = protected(note, notes)
+        if time is not None:
+            tr.check_time(time)
+            if not day or day == "unassigned":
+                raise MarvinError("A clock time requires a day — provide day (Time requires a day in the app).")
         if label_ids:
             data["labelIds"] = label_ids
         if due_date:
@@ -371,62 +660,288 @@ async def create_task(
         if time_block_section:
             data["timeBlockSection"] = time_block_section
         created = await get_client().add_task(data)
-        return {"created": created}
+        out: dict[str, Any] = {"created": created}
+        if notes:
+            out["notes"] = notes
+        if not (size is not None or subtasks or time or reminders):
+            return out
+        task_id = created.get("_id") if isinstance(created, dict) else None
+        if not task_id:
+            out["warning"] = "The task was created but the response had no id; size, subtasks, time and reminders were not written."
+            return out
+        c = Chain()
+        c.completed.append("create the task")
+        c.extra["created"] = created
+        fields: dict[str, Any] = {}
+        if size is not None:
+            fields["taskSize"] = size_value(size)
+        raw = subtask_setters({}, add=subtasks) if subtasks else []
+        if fields or raw:
+            await c.step("write size and subtasks", lambda: get_client().update_doc(task_id, build_setters(fields, raw)))
+        if time or reminders:
+            _, more = await write_time_and_reminders(
+                c, task_id, data["title"], iso_day(data.get("day")), time or None, reminders
+            )
+            out.setdefault("notes", []).extend(more)
+        out["completed_steps"] = c.completed
+        return out
     except Exception as e:
         return tool_error(e)
 
 
 @mcp.tool(annotations=IDEMPOTENT_WRITE)
 async def mark_done(
-    item_id: Annotated[str, Field(description="Task ID (NOT a project — see description)")],
+    item_id: Annotated[str, Field(description="Task ID (NOT a project — mark_project_done closes those)")],
+    value: Annotated[
+        float | None,
+        Field(description="Habit task with a count only: the value to record (default 1)", gt=0),
+    ] = None,
 ) -> dict:
-    """Mark a task as done; projects are completed in the app.
-    Mark a task as done (via /markDone, with the correct timezone offset).
-    Tasks ONLY: for projects the API responds 400 'Can only mark Tasks done
-    with this API' (verified live 2026-08-19) — projects are completed in the
-    Marvin app (done=true via /doc/update would technically work but skips
-    the app's side effects). Safe for generated instances of recurring tasks
-    too (verified live): the instance ID is deterministic
-    ('YYYY-MM-DD_<recurringTaskId>'), so no duplicates can occur.
-    Error codes (live-tested 2026-08-29): 404 = the task does not exist
-    (deleted/wrong ID — unlike /doc/update, which responds 500);
-    400 = already marked done (harmless, nothing changes). Stops running
-    time tracking on the task and writes the tracking interval to
-    task.times (receipt also in /tracks; live-tested 2026-09-02 in two
-    runs — on 2026-08-29 times was NOT written, the server behavior has
-    changed; a direct /track STOP still does not write times, see
-    stop_tracking). Pinned task: the original stays open and
-    pinned as documented; the completed copy gets its own ID and can be
-    found via get_done_items. Leaves `day` untouched; the app sets day =
-    today only on unscheduled and future-dated tasks, a past day is kept
-    there too (app code, 2026-08-30). Completed tasks can be read back with
-    /doc (by ID) and listed with get_done_items."""
+    """Mark a task as done and clean up its reminders as the app does.
+    Reads the task, runs /markDone (configured timezone) and then does what
+    the app does: the server entries T and M are removed and reminderTime is
+    cleared; the reminders list remains. Projects: /markDone responds 400
+    (tasks only); projects are closed with mark_project_done.
+    404 = does not exist, 400 = already done or a project.
+    Habit task (field habitId): the habit is also recorded with
+    /updateHabit at 12:00 on the task's day, and habitRepAt is set. Habit
+    with a count (recordType number): value is recorded with the current
+    time; the task is checked off only once the day's total reaches the
+    target — otherwise it stays open and the response shows the total.
+    Recurring occurrence: safe (deterministic id). After completion: the
+    next occurrence is created +N days later. With a future day the tool
+    does what the app does: the occurrence is moved to today before it is
+    checked off, and the next one is counted from today.
+    If a step fails the response says which steps were done. Running time
+    tracking is stopped and written to task.times. /markDone does not set
+    workedOnAt and does not stamp fieldUpdates, which the app does."""
     try:
-        result = await get_client().mark_done(item_id)
+        c = Chain()
+        doc = await read_doc(c, item_id)
+        out: dict[str, Any] = {}
+        habit_id = doc.get("habitId")
+        if habit_id:
+            habit = await read_doc(c, habit_id, "read the habit")
+            day = iso_day(doc.get("day")) or local_today()
+            if habit.get("recordType") == "number":
+                v = value if value is not None else 1
+                t = now_ms()
+                v_send = int(v) if float(v).is_integer() else v
+                await c.step("record the habit", lambda: get_client().update_habit(
+                    {"habitId": habit_id, "updateDB": True, "time": t, "value": v_send}))
+                lo, hi = day_bounds_ms(day)
+                hist = habit.get("history") or []
+                total = sum(hist[k + 1] for k in range(0, len(hist) - 1, 2) if lo <= hist[k] < hi) + v
+                target = habit.get("target") or 1
+                out["habit"] = {"habit_id": habit_id, "registered": v, "day_total": total, "target": target}
+                if total < target:
+                    out["note"] = f"The habit has {total} of {target} today; the task stays open until the target is reached."
+                    out["completed_steps"] = c.completed
+                    return out
+                rep_at = t
+            else:
+                rep_at = day_noon_ms(day)
+                await c.step("record the habit", lambda: get_client().update_habit(
+                    {"habitId": habit_id, "updateDB": True, "time": rep_at, "value": 1}))
+                out["habit"] = {"habit_id": habit_id, "registered_at": rep_at}
+        today = local_today()
+        occ_day = iso_day(doc.get("day"))
+        if doc.get("echo") and doc.get("recurringTaskId") and occ_day and occ_day > today:
+            from . import recurrence as rec
+
+            gen = await read_doc(c, doc["recurringTaskId"], "read the recurring task")
+            n = int(gen.get("echoDays") or 1)
+            plus = lambda d: (datetime.strptime(d, "%Y-%m-%d") + timedelta(days=n)).strftime("%Y-%m-%d")
+            if rec.ECHO_EARLY_DONE_MODE == "app":
+                await c.step("move the occurrence to today", lambda: get_client().update_doc(
+                    item_id, make_setters({"day": today})))
+                out["echo"] = (f"The occurrence was moved to today as in the app; the next occurrence comes "
+                               f"{plus(today)}, counted from today.")
+            else:
+                out["echo"] = (f"The next occurrence comes {plus(occ_day)}, counted from the occurrence's day "
+                               f"{occ_day} — the app would have counted from today ({plus(today)}).")
+        result = await c.step("mark done", lambda: get_client().mark_done(item_id))
         remember_done(result)
-        return {"completed": result}
+        out["completed"] = result
+        if habit_id:
+            await c.step("set habitRepAt", lambda: get_client().update_doc(item_id, make_setters({"habitRepAt": rep_at})))
+        removed = await clear_task_reminders(c, doc, item_id, clear_list=False)
+        if removed:
+            out["reminders_removed"] = removed
+        out["completed_steps"] = c.completed
+        return out
     except Exception as e:
         return tool_error(e)
 
 
 @mcp.tool(annotations=IDEMPOTENT_WRITE)
 async def unmark_done(
-    item_id: Annotated[str, Field(description="Task ID")],
+    item_id: Annotated[str, Field(description="Task ID (not a project — those are reopened in the app)")],
 ) -> dict:
-    """Undo a task's completion.
-    Undo a completion (sets done=false and clears doneAt via /doc/update).
-    Requires the Full Access Token. Safe for generated instances of recurring
-    tasks too (verified live). Note: any kudos from the completion are not
-    adjusted; awarded reward points can however be undone with
-    unclaim_reward_points. A permanent 500 = the document does not exist
-    (deleted or wrong ID; the server responds 500 instead of 404, verified
-    live 2026-08-29)."""
+    """Undo a task's completion, and the habit's record.
+    Projects and categories: refuses without writing — a closed project is
+    reopened in the app. Sets done=false and clears doneAt via /doc/update
+    (Full Access Token); the app's own undo leaves doneAt in place. A task
+    that never had a day (firstScheduled 'unassigned' and no
+    fieldUpdates.day stamp) got its day from /markDone: the day that
+    mark_done set is removed (stored as 'unassigned'; the app's own undo
+    writes null — both mean no day). Otherwise the day stays.
+    As in the app: the clock time's reminder (T) is not restored — the time
+    does not remind until it is set again — but own reminders in the
+    reminders list still apply. Habit task: the habit's latest record is
+    undone with /updateHabit undo and habitRepAt is cleared, but only if
+    the history's last entry is the task's habitRepAt; otherwise the
+    response says so and the habit is left untouched (undo always takes the
+    latest entry). Open habit task (a partial record on a habit with a
+    count): nothing is written — undo the record with record_habit
+    undo=true, as the app's undo does. Kudos are not adjusted; reward
+    points are undone with unclaim_reward_points. A permanent 500 = the
+    document does not exist."""
     try:
-        result = await get_client().update_doc(
-            item_id, make_setters({"done": False, "doneAt": None})
-        )
+        c = Chain()
+        doc = await read_doc(c, item_id)
+        if doc.get("db") == "Categories":
+            return {
+                "error": "The document is a project or category; nothing changed. Reopen a closed project in the "
+                "app - unmark_done would only reset done and doneAt and leave doneDate, day and workedOnAt.",
+                "completed_steps": c.completed,
+            }
+        fields: dict[str, Any] = {"done": False, "doneAt": None}
+        out: dict[str, Any] = {}
+        habit_id = doc.get("habitId")
+        if habit_id and not doc.get("done"):
+            # The app writes nothing on the task for a partial record or its undo.
+            return {
+                "error": "The habit task is not marked done; nothing changed. Undo a partial record with "
+                "record_habit(habit_id, undo=true), which takes the habit's latest entry (as the app's undo does).",
+                "habit_id": habit_id,
+                "completed_steps": c.completed,
+            }
+        if habit_id:
+            habit = await read_doc(c, habit_id, "read the habit")
+            hist = habit.get("history") or []
+            last = hist[-2] if len(hist) >= 2 else None
+            rep = doc.get("habitRepAt")
+            if rep and last == rep:
+                await c.step("undo the habit record", lambda: get_client().update_habit(
+                    {"habitId": habit_id, "updateDB": True, "undo": True}))
+                fields["habitRepAt"] = None
+                out["habit_undone"] = True
+            else:
+                out["habit_warning"] = (
+                    "The habit's latest record is not this task's (habitRepAt "
+                    f"{rep}, last entry {last}); the habit was not undone. Undo it in the app "
+                    "(Habits → right-click → Undo last) if needed."
+                )
+        day_now = doc.get("day")
+        if day_now and day_now != "unassigned" and not doc.get("recurringTaskId"):
+            stamped = "day" in (doc.get("fieldUpdates") or {})
+            if doc.get("firstScheduled") == "unassigned" and not stamped:
+                # /markDone set the day without a stamp; the app's own undo writes null.
+                fields["day"] = None
+                out["day_note"] = (f"The day {day_now} that mark_done set was removed: the task had no day before "
+                                   "it was checked off (stored as 'unassigned'; the app's own undo writes null — "
+                                   "both mean no day).")
+            elif doc.get("firstScheduled") == "unassigned":
+                out["day_note"] = (f"The day {day_now} remains. If the task had no day before it was checked off, "
+                                   "remove it with update_task(day='unassigned').")
+        result = await c.step("undo the completion", lambda: get_client().update_doc(item_id, make_setters(fields)))
         forget_done(item_id)
-        return {"updated": result}
+        out["updated"] = result
+        if doc.get("taskTime"):
+            out["note"] = (
+                "The clock time's reminder is not restored (as in the app); own reminders still apply."
+            )
+        out["completed_steps"] = c.completed
+        return out
+    except Exception as e:
+        return tool_error(e)
+
+
+def close_code(project_id: str, kids: list[dict]) -> str:
+    """The code from step 1: computed from the project's id and the open
+    children's ids, so that step 2 closes exactly what was shown."""
+    ids = ",".join(sorted(str(k.get("_id")) for k in kids))
+    return hashlib.sha256(f"{project_id}|{ids}".encode()).hexdigest()[:8]
+
+
+@mcp.tool(annotations=IDEMPOTENT_WRITE)
+async def mark_project_done(
+    project_id: Annotated[str, Field(description="ID of the project to close")],
+    confirm_code: Annotated[
+        str | None,
+        Field(description="The code from step 1. Without a code only the open children and the code are shown; nothing is closed"),
+    ] = None,
+) -> dict:
+    """Close a project and its open tasks, in two steps.
+    Step 1 (without confirm_code): reads the project and its open children,
+    lists them with the warning that they too will be marked done, and
+    returns a code. Nothing is written. Step 2 (confirm_code from step 1):
+    reads the children again; if the code no longer matches, nothing is
+    closed and the response gives the new list and code. Otherwise each
+    open task is checked off like mark_done (/markDone and reminder
+    cleanup) and the project is closed last with a /doc/update of the
+    app's five fields: done, doneAt and workedOnAt (now), day (the
+    project's day, or today if it has none) and doneDate (same as day) — as
+    the app does. The deadline (dueDate) is not touched. The app itself
+    refuses to close a project with open children; this tool closes them
+    on purpose. The children are checked off with /markDone, which does not
+    set workedOnAt and does not stamp fieldUpdates — the app sets
+    workedOnAt on the children.
+    Stops in step 1 without a code if an open child is a sub-project, a
+    habit task or an occurrence of a recurring task — close those first
+    (the app's behavior there is untested). Completed projects do not show
+    in get_categories. Undo in the app; unmark_done refuses projects.
+    If a step fails the response says which were done; the project then
+    stays open. Cost: step 1 two calls; step 2 three, plus one per task and
+    two more per task with reminders."""
+    try:
+        c = Chain()
+        doc = await read_doc(c, project_id, "read the project")
+        if doc.get("db") != "Categories" or doc.get("type") != "project":
+            return {"error": "The document is not a project; tasks are closed with mark_done, categories are not closed.",
+                    "completed_steps": c.completed}
+        if doc.get("done"):
+            return {"error": "The project is already done; nothing changed.", "completed_steps": c.completed}
+        kids = await c.step("read the children", lambda: get_client().children(project_id))
+        kids = [k for k in kids or [] if isinstance(k, dict)]
+        listing = [child_summary(k) for k in kids]
+        head = {"project": {"id": project_id, "title": doc.get("title")}, "open_children": listing}
+        blocked = [x for x in listing if x["kind"] != "task"]
+        if blocked:
+            return {**head, "error": "The project has open children this tool does not close (sub-projects, "
+                    "habit tasks, occurrences); nothing closed. Close them first.",
+                    "blocking_children": blocked, "completed_steps": c.completed}
+        code = close_code(project_id, kids)
+        step1 = {**head, "confirm_code": code,
+                 "warning": (f"These {len(kids)} tasks will also be marked done." if kids
+                             else "The project has no open children."),
+                 "next": "Close with mark_project_done(project_id, confirm_code) after the user's yes."}
+        if confirm_code is None:
+            return {**step1, "needs_confirm": True, "completed_steps": c.completed}
+        if confirm_code != code:
+            return {**step1, "needs_confirm": True, "completed_steps": c.completed,
+                    "error": "The code does not match the project's open children now; nothing closed. Show the "
+                    "list again and use the new code."}
+        out: dict[str, Any] = {"project": head["project"]}
+        closed: list[str] = []
+        removed: list[str] = []
+        c.extra["children_done"] = closed
+        for k in kids:
+            kid = k["_id"]
+            result = await c.step(f"mark done {kid}", lambda kid=kid: get_client().mark_done(kid))
+            remember_done(result)
+            closed.append(kid)
+            removed += await clear_task_reminders(c, k, kid, clear_list=False)
+        ts = now_ms()
+        day = iso_day(doc.get("day")) or local_today()
+        fields = {"done": True, "doneAt": ts, "doneDate": day, "day": day, "workedOnAt": ts}
+        result = await c.step("close the project", lambda: get_client().update_doc(project_id, make_setters(fields)))
+        out.update({"closed": result, "children_done": closed, "completed_steps": c.completed,
+                    "note": "The project no longer shows in get_categories (as in the app)."})
+        if removed:
+            out["reminders_removed"] = removed
+        return out
     except Exception as e:
         return tool_error(e)
 
@@ -505,28 +1020,29 @@ async def update_task(
         bool | None,
         Field(description="Orbit strategy: True = exempt the task from automatic orbiting (auto-orbit otherwise pulls in scheduled tasks). UNDOCUMENTED field (bool type verified in live data 2026-08-29)"),
     ] = None,
+    size: Annotated[SizeArg | None, Field(description="Size XS/S/M/L/XL (taskSize 1-5), '' removes (false)")] = None,
+    subtasks_add: Annotated[list[str] | None, Field(description="New subtasks (titles), added last")] = None,
+    subtasks_done: Annotated[list[str] | None, Field(description="Subtask ids to check off (ids from the task's subtasks)")] = None,
+    subtasks_rename: Annotated[dict[str, str] | None, Field(description="Subtask id → new title")] = None,
+    time: Annotated[str | None, Field(description=TIME_DESC)] = None,
+    reminders: Annotated[list[str] | None, Field(description=REMINDERS_DESC + ". Replaces the list; [] removes all own reminders")] = None,
 ) -> dict:
-    """Update a task: title, day, deadline, labels, note, estimate, sections.
-    Update fields on an existing TASK via /doc/update (Full Access Token).
-    For categories/projects, use update_category_or_project. For priority,
-    use set_priority. Always complete tasks via mark_done, never here.
-    Strategy-dependent fields (start/end date, planned_week/month,
-    review_date, backburner, orbit, the sections) can be set even when the
-    strategy is disabled in the app — they just are not shown in the UI then.
-    A clock time (Time/taskTime) and the task's reminder fields are set in
-    the APP, not here — an MCP limitation (double-write sync, see
-    set_reminder), NOT a Marvin limitation: Marvin fully supports times on
-    tasks.
-    Note on recurring tasks: never edit recurrence rules here — neither on a
-    generated instance (recurring=true, _id 'YYYY-MM-DD_<id>') nor on the
-    generator document. Do that editing in the Marvin app. Simple field
-    changes (title, note) on a single instance are fine.
-    Note: Marvin's server can sporadically respond 500 on /doc/update
-    (transient and atomic — no partial write); just retry. But a PERMANENT
-    500 (persists across retries) means the document does not exist —
-    deleted, or a wrong/never-existing ID (the server responds 500 instead
-    of 404 for missing IDs, verified live 2026-08-29). Fetch a fresh ID via
-    get_categories/get_children."""
+    """Update a task: title, day, time, reminders, size, subtasks.
+    /doc/update (Full Access Token). Categories/projects:
+    update_category_or_project; priority and frog: set_priority;
+    completion: mark_done.
+    Changing the day does what the app does: reminderTime and the server
+    entry T move to the new day, own reminders (M) stay and are listed in
+    the response. New clock time: new T, own reminders (including 'X min
+    before') keep their time. time='' removes the clock time in the app's
+    form. If the day is removed (day='unassigned') the clock time and T are
+    removed as in the app; own reminders stay. Subtasks are written with
+    dotted keys. parent_id or subtasks on a recurring occurrence give a
+    warning: the recurring task stays as it is, so future occurrences
+    follow it — change it with update_recurring_task. Strategy-dependent
+    fields are stored even when the strategy is off in the app. A sporadic
+    500 on /doc/update is transient (retried once); a permanent 500 = the
+    document does not exist."""
     try:
         fields: dict[str, Any] = {}
         if title is not None:
@@ -536,8 +1052,9 @@ async def update_task(
         if day is not None:
             check_day(day)
             fields["day"] = local_today() if day == "today" else day
+        notes: list[str] = []
         if note is not None:
-            fields["note"] = note
+            fields["note"] = protected(note, notes)
         if due_date is not None:
             if due_date:
                 check_iso_date(due_date, "due_date")
@@ -586,10 +1103,69 @@ async def update_task(
             fields["orbit"] = orbit
         if no_auto_orbit is not None:
             fields["noAutoOrbit"] = no_auto_orbit
-        if not fields:
+        if size is not None:
+            fields["taskSize"] = size_value(size)
+        wants_sub = bool(subtasks_add or subtasks_done or subtasks_rename)
+        if not fields and not wants_sub and time is None and reminders is None:
             return {"error": "No fields to update were given."}
-        result = await get_client().update_doc(item_id, make_setters(fields))
-        return {"updated": result}
+        c = Chain()
+        out: dict[str, Any] = {}
+        needs_doc = wants_sub or time is not None or reminders is not None or "day" in fields or "parentId" in fields
+        doc = await read_doc(c, item_id) if needs_doc else {}
+        if doc and is_instance(doc) and ("parentId" in fields or wants_sub):
+            notes.append(
+                "This is an occurrence of a recurring task: the change applies only to this occurrence. Future "
+                "occurrences follow the recurring task — change it with update_recurring_task."
+            )
+        raw = subtask_setters(doc.get("subtasks"), subtasks_add, subtasks_done, subtasks_rename) if wants_sub else []
+        new_day = iso_day(fields.get("day")) if "day" in fields else iso_day(doc.get("day"))
+        # Day change with an existing clock time: move reminderTime and T.
+        moved_t = None
+        clear_t = False
+        if "day" in fields and time is None and doc.get("taskTime"):
+            if new_day:
+                fields["reminderTime"] = tr.epoch_s(new_day, doc["taskTime"])
+                moved_t = fields["reminderTime"]
+                own = doc.get("reminders") or []
+                if own and reminders is None:
+                    notes.append(
+                        "Own reminders stay at their old times, as in the app: "
+                        f"{[r.get('time') for r in own]}. Move them with reminders=[...] or remove them with reminders=[]."
+                    )
+            else:
+                # As the app does: the clock time is removed, T is removed on
+                # the server, own reminders (M) stay.
+                base = fields.get("title") or doc.get("title") or ""
+                fields.update(tr.cleared_time_fields(base))
+                fields.update({"autoSnoozeChosen": None, "remind": None})
+                clear_t = True
+                notes.append(
+                    "The day was removed: the clock time was removed as in the app. Own reminders stay "
+                    f"in reminders: {[r.get('time') for r in (doc.get('reminders') or [])]}; their server entries "
+                    "are not touched (the server has already removed an entry whose time has passed)."
+                )
+        if fields or raw:
+            result = await c.step("update", lambda: get_client().update_doc(item_id, build_setters(fields, raw)))
+            out["updated"] = result
+        if clear_t:
+            await c.step("remove the server entry T", lambda: get_client().delete_reminders([item_id]))
+        if moved_t is not None:
+            title_now = fields.get("title") or doc.get("title") or ""
+            await c.step("move the server entry T", lambda: get_client().set_reminders([tr.server_t(item_id, title_now, moved_t)]))
+        if time is not None or reminders is not None:
+            base_title = fields.get("title") or doc.get("title") or ""
+            box: dict[str, Any] = {}
+            tfields, more = await write_time_and_reminders(
+                c, item_id, base_title, new_day, time, reminders, doc, result_box=box)
+            notes.extend(more)
+            out["time_and_reminders"] = tfields
+            if "doc" in box:
+                # updated shows the state after the last write.
+                out["updated"] = box["doc"]
+        if notes:
+            out["notes"] = notes
+        out["completed_steps"] = c.completed
+        return out
     except Exception as e:
         return tool_error(e)
 
@@ -603,21 +1179,17 @@ async def set_priority(
     ] = None,
     frog: Annotated[
         int | None,
-        Field(description="Frog: 3=monster, 2=baby, 1=normal, 0=remove", ge=0, le=3),
+        Field(description=FROG_DESC + ". 0 removes (stored as false)", ge=0, le=4),
     ] = None,
 ) -> dict:
-    """Set priority (P1-P3 or low) or the frog marker on a task.
-    Set or change priority (isStarred) and/or the frog marker on an
-    existing TASK. Requires the Full Access Token. The app's four levels are
-    stored as isStarred 3/2/1/-1 (Most/Very/Important/Low priority; -1
-    verified against the app's code and live-tested 2026-08-30). Low
-    priority is shown in the app only with 'Enable low priority' on in the
-    Priorities strategy; the value is stored regardless. Does not apply to
-    projects: they use the string field priority ('high'/'mid'/'low' =
-    Most/Very/Important; no Low level), not isStarred — set it via
-    update_category_or_project. A permanent 500 = the task does not exist
-    (deleted or wrong ID) — the server responds 500 instead of 404
-    (verified live 2026-08-29); fetch a fresh ID."""
+    """Set priority (P1-P3 or low) or the dread level on a task.
+    Set or change priority (isStarred) and/or the frog/dread level
+    (isFrogged 1-4, read in the app 2026-10) on an existing TASK. Requires
+    the Full Access Token. The app's four priority levels are stored as
+    isStarred 3/2/1/-1; Low priority is shown only with 'Enable low
+    priority' on. Does not apply to projects: they use the string field
+    priority ('high'/'mid'/'low'); set it via update_category_or_project.
+    A permanent 500 = the task does not exist (deleted or wrong ID)."""
     try:
         fields: dict[str, Any] = {}
         if priority is not None:
@@ -634,34 +1206,96 @@ async def set_priority(
 
 @mcp.tool(annotations=DESTRUCTIVE)
 async def delete_task(
-    item_id: Annotated[str, Field(description="ID of the document to delete")],
+    item_id: Annotated[str, Field(description="ID of the task (or of a project/category without open children) to delete")],
+    scope: Annotated[
+        Literal["this", "all"],
+        Field(description="Occurrence of a recurring task: 'this' = only this one (default), 'all' = the whole recurring task with all open occurrences (completed ones are kept). The recurring task's own id is accepted only with 'all'"),
+    ] = "this",
 ) -> dict:
     """Delete a task permanently, with no trash and no undo.
-    Delete a task/document PERMANENTLY via /doc/delete (Full Access Token).
-    Marvin's trash is client-side — an API deletion bypasses it and
-    CANNOT be undone (deleting in the app instead puts the item in the
-    trash, where it can be restored — prefer the app when undo matters). Only use when the
-    user explicitly wants a deletion. Never delete the generator document of
-    a recurring task here (risk of the whole series disappearing without the
-    app's cleanup logic) — remove the recurrence in the Marvin app instead.
-    THE APP'S VIEW (live-tested 2026-09-12, PWA + Windows desktop app
-    1.70.0): an API deletion is NOT rendered in an open Marvin client —
-    neither waiting nor switching views helps. First confirm the server
-    with get_children on the parent (the task should be missing), then ask
-    the user to reload the client BEFORE the row is touched in the app: F5
-    in the web app/PWA, restart of the desktop app. Editing the stale row in
-    the app can RECREATE the document via the client's conflict resolution
-    (observed once, 2026-09-12, in one of the two clients — which one is
-    not recorded: row still shown after the deletion, unscheduled with the
-    x button in the app, document back on a new _rev 84-97 s after the
-    deletion; reported upstream). If the user has the app
-    open: suggest deleting IN THE APP first (goes to the trash, no conflict
-    with the app's own copy); API deletion when the user explicitly wants
-    it, and then with the reload rule above."""
+    Deletion via the API bypasses the app's trash and cannot be undone —
+    use only when the user explicitly wants a deletion. If the task has
+    reminders they are cleared and the server entries removed before the
+    deletion, so that no notification arrives. An occurrence of a recurring
+    task follows the app's two choices: 'this' adds the occurrence's day to
+    the recurring task's deletedDates and deletes the occurrence; 'all'
+    deletes all open occurrences and then the recurring task, completed
+    occurrences are kept. If a step fails the response says which were
+    done. THE APP'S VIEW: an open client does not render the deletion —
+    reload the client (F5, restart of the desktop app) before the row is
+    touched; a write from the app on the stale row recreates the document.
+    A recurring task (db RecurringTasks) is deleted with scope 'all', on an
+    occurrence or on the recurring task's own id — also before it has any
+    occurrences (they are created only when a client opens after the day
+    rolls over). Habit recurrences are not deleted here.
+    Projects and categories: deleted only without open children — the tool
+    reads /children first (one more call) and otherwise refuses, with the
+    list, so that no children are left with a parent that does not exist.
+    Completed children do not show in /children and are left behind with
+    the parent gone. The project's notebook is not deleted (as in the app);
+    the response gives its id for delete_notebook."""
     try:
-        result = await get_client().delete_doc(item_id)
+        from . import tools_recurring as rct
+
+        c = Chain()
+        doc = await read_doc(c, item_id)
+        if doc.get("db") == "Categories":
+            kids = await c.step("read the children", lambda: get_client().children(item_id))
+            kids = [k for k in kids or [] if isinstance(k, dict)]
+            if kids:
+                return {
+                    "error": f"{'The project' if doc.get('type') == 'project' else 'The category'} has {len(kids)} "
+                    "open children; nothing deleted. Move, complete or delete the children first "
+                    "(mark_project_done closes a project together with its open tasks).",
+                    "open_children": [child_summary(k) for k in kids],
+                    "completed_steps": c.completed,
+                }
+        is_gen = doc.get("db") == "RecurringTasks"
+        if is_gen and scope != "all":
+            return {"error": "The document is a recurring task; use scope='all' to delete it with all open occurrences."}
+        if is_gen and doc.get("recurringType") not in (None, "", "task"):
+            return {"error": "Habit recurrences are not deleted here; remove the habit in the app."}
+        out: dict[str, Any] = {}
+        gen_id = item_id if is_gen else doc.get("recurringTaskId")
+        if gen_id and scope == "all":
+            gen = doc if is_gen else await read_doc(c, gen_id, "read the recurring task")
+            occ = await c.step("read the occurrences", lambda: rct._occurrences({**gen, "_id": gen_id}))
+            targets = {o.get("_id"): o for o in occ if not o.get("done")}
+            if not is_gen and not doc.get("done"):
+                targets.setdefault(item_id, doc)
+            with_rem = [d for d in targets.values() if tr.has_reminder_state(d)]
+            for d in with_rem:
+                await clear_task_reminders(c, d, d["_id"], clear_list=True)
+            if with_rem:
+                await c.pause(chainmod.DELETE_SYNC_PAUSE_S)
+            for oid in targets:
+                await c.step(f"delete {oid}", lambda oid=oid: get_client().delete_doc(oid))
+                forget_done(oid)
+            await c.step("delete the recurring task", lambda: get_client().delete_doc(gen_id))
+            invalidate_missed_mode(gen_id)
+            out.update({"deleted_occurrences": list(targets), "deleted_recurring_task": gen_id,
+                        "note": "Completed occurrences are kept. An open client shows the deletions only after a reload."})
+            out["completed_steps"] = c.completed
+            return out
+        if gen_id:
+            gen = await read_doc(c, gen_id, "read the recurring task")
+            out["deleted_dates"] = await rct.add_deleted_dates(c, gen_id, gen, [iso_day(doc.get("day"))])
+        removed = await clear_task_reminders(c, doc, item_id, clear_list=True)
+        if removed:
+            await c.pause(chainmod.DELETE_SYNC_PAUSE_S)
+            out["reminders_removed"] = removed
+        result = await c.step("delete", lambda: get_client().delete_doc(item_id))
         forget_done(item_id)
-        return {"deleted": result}
+        out["deleted"] = result
+        out["completed_steps"] = c.completed
+        out["note"] = "An open Marvin client shows the task until it is reloaded; do not touch the row before then."
+        if doc.get("db") == "Categories":
+            out["note"] += (" Completed children do not show in /children and remain with the parent gone.")
+            if doc.get("notebookId"):
+                out["notebook_left"] = doc["notebookId"]
+                out["note"] += (f" The notebook {doc['notebookId']} remains on the server (as when the app deletes"
+                                " a project); remove it with delete_notebook if it is not needed.")
+        return out
     except Exception as e:
         return tool_error(e)
 
@@ -674,19 +1308,32 @@ async def get_today_items(
     date: Annotated[
         str | None, Field(description="Date YYYY-MM-DD; returns everything open with day <= the date; omit for today (MARVIN_TIMEZONE, else the system timezone)")
     ] = None,
+    include_hidden: Annotated[
+        bool, Field(description="True = include occurrences the app hides (If you miss one)")
+    ] = False,
 ) -> dict:
     """Get open tasks and projects scheduled today or earlier.
-    Get open tasks/projects with `day` <= the date (default today in
-    MARVIN_TIMEZONE, or the system's local timezone when unset) — i.e.
-    also items scheduled earlier than the date, not only those on exactly
-    that day. Tasks that only have a deadline are not included; fetch them
-    with get_due_items. Observed 2026-09-11 with rollover enabled in the
-    account; items with a clock time are untested.
-    Note: today's recurring tasks may be missing if the Marvin app hasn't
-    been running yet today (instances are generated by the client)."""
+    Open tasks/projects with day <= the date (default today in the
+    configured timezone, MARVIN_TIMEZONE), not only exactly on the date.
+    Deadline-only items: get_due_items.
+    Filters as the app does: for a recurring task with If you miss one =
+    Keep just one (carry) only the oldest open occurrence is shown, for
+    Only the current one (skip) only the date's own; Keep them all and the
+    account default ('', assumed to be Keep them all) show all. The mode is
+    read (/doc) only for recurring tasks with an open occurrence before
+    today, cached until local midnight; a mode changed in the app takes
+    effect by the next day at the latest. If the mode cannot be read the
+    occurrences are shown.
+    The response gives hidden_count and which were hidden;
+    include_hidden=true includes all. Habit tasks (field habitId) are
+    listed in habit_task_ids. Recurring occurrences are created the first
+    time a Marvin client opens after the day rolls over; read before that,
+    today's occurrences are missing, and a recurring task created during
+    the day may lack them."""
     try:
+        target = date or local_today()
         items = await get_client().today_items(date)
-        return {"date": date or local_today(), "count": len(items), "items": items}
+        return await filtered_listing(items, target, "today", include_hidden, {"date": target})
     except Exception as e:
         return tool_error(e)
 
@@ -696,11 +1343,21 @@ async def get_due_items(
     by: Annotated[
         str | None, Field(description="Deadline up to and including YYYY-MM-DD; omit for today")
     ] = None,
+    include_hidden: Annotated[
+        bool, Field(description="True = include occurrences the app hides (Keep just one)")
+    ] = False,
 ) -> dict:
-    """Get open tasks and projects with a deadline today or earlier."""
+    """Get open tasks and projects with a deadline today or earlier.
+    Filters Keep just one (carry) as the app does: only the oldest open
+    occurrence per recurring task is shown. Only the current one (skip) is
+    not filtered here. The mode is read only for recurring tasks with an
+    open occurrence before today and cached until local midnight; changes
+    made in the app take effect by the next day at the latest. The response
+    gives hidden_count; include_hidden=true includes all."""
     try:
+        target = by or local_today()
         items = await get_client().due_items(by)
-        return {"by": by or local_today(), "count": len(items), "items": items}
+        return await filtered_listing(items, target, "due", include_hidden, {"by": target})
     except Exception as e:
         return tool_error(e)
 
@@ -852,7 +1509,7 @@ async def create_category_or_project(
     ] = None,
     time_estimate_minutes: Annotated[
         int | None,
-        Field(description="Time estimate in minutes. NOTE: rendered as the project's OWN estimate — the UI does not aggregate it with the children's, despite the wiki's claim (verified in the app 2026-08-29)", ge=1),
+        Field(description="Time estimate in minutes. The project's own estimate takes precedence; without one the project shows the sum of its children's (per Marvin support)", ge=1),
     ] = None,
     planned_week: Annotated[
         str | None,
@@ -878,7 +1535,7 @@ async def create_category_or_project(
     ] = None,
     frog: Annotated[
         int | None,
-        Field(description="Projects ONLY: frog marker 1=normal, 2=baby, 3=monster", ge=1, le=3),
+        Field(description="Projects ONLY: " + FROG_DESC, ge=1, le=4),
     ] = None,
     label_ids: Annotated[
         list[str] | None, Field(description="Label IDs (from get_labels) — categories AND projects: categories have labels, stored in the same field as projects' and rendered in the app (live-tested + verified in the app 2026-09-11)")
@@ -905,6 +1562,8 @@ async def create_category_or_project(
     it locally before any API call. Category titles are unaffected
     (/doc/create parses nothing)."""
     try:
+        notes: list[str] = []
+        note = protected(note, notes)
         if kind == "category":
             rejected = {
                 "day": day, "due_date": due_date, "priority": priority,
@@ -956,7 +1615,8 @@ async def create_category_or_project(
                 data["isFrogged"] = frog
             if label_ids:
                 data["labelIds"] = label_ids
-            return {"created": await get_client().add_project(data)}
+            created = await get_client().add_project(data)
+            return {"created": created, **({"notes": notes} if notes else {})}
         # Own _id: /doc/create does not echo back the server-generated id
         # (verified against the live API 2026-08-19), so we set it ourselves
         # in order to be able to return it.
@@ -987,7 +1647,8 @@ async def create_category_or_project(
         if review_date:
             check_iso_date(review_date, "review_date")
             doc["reviewDate"] = review_date
-        return {"created": await get_client().create_doc(doc)}
+        created = await get_client().create_doc(doc)
+        return {"created": created, **({"notes": notes} if notes else {})}
     except Exception as e:
         return tool_error(e)
 
@@ -1007,7 +1668,7 @@ async def update_category_or_project(
     ] = None,
     time_estimate_minutes: Annotated[
         int | None,
-        Field(description="Time estimate in minutes, 0 removes it. On projects: rendered as the project's OWN estimate, no aggregation with the children's (verified in the app 2026-08-29)", ge=0),
+        Field(description="Time estimate in minutes, 0 removes it. On projects the own estimate takes precedence; without one the project shows the sum of its children's (per Marvin support)", ge=0),
     ] = None,
     start_date: Annotated[
         str | None, Field(description="Start date YYYY-MM-DD (Start & End Dates strategy), '' removes")
@@ -1042,7 +1703,11 @@ async def update_category_or_project(
     ] = None,
     frog: Annotated[
         int | None,
-        Field(description="Projects ONLY: frog 3=monster, 2=baby, 1=normal, 0=remove", ge=0, le=3),
+        Field(description="Projects ONLY: " + FROG_DESC + ". 0 removes", ge=0, le=4),
+    ] = None,
+    size: Annotated[
+        SizeArg | None,
+        Field(description="Projects ONLY: size XS/S/M/L/XL (taskSize 1-5), '' removes"),
     ] = None,
     label_ids: Annotated[
         list[str] | None,
@@ -1064,7 +1729,7 @@ async def update_category_or_project(
     """Update a category or project: labels, color, icon, note, project fields.
     Update fields on an existing CATEGORY or PROJECT via /doc/update
     (Full Access Token). For tasks, use update_task. Fields marked
-    'Projects ONLY' (day/due_date/priority/frog) are blocked for
+    'Projects ONLY' (day/due_date/priority/frog/size) are blocked for
     categories: if any of them is given, the tool first reads the document
     (1 extra API call) and refuses if it is a category. The reason is
     structural, not technical: a category can never be completed or
@@ -1087,7 +1752,7 @@ async def update_category_or_project(
     try:
         project_only = {
             "day": day, "due_date": due_date, "priority": priority,
-            "frog": frog,
+            "frog": frog, "size": size,
         }
         given = [name for name, val in project_only.items() if val is not None]
         if given:
@@ -1114,8 +1779,9 @@ async def update_category_or_project(
             fields["title"] = clean_title(title)
         if parent_id is not None:
             fields["parentId"] = parent_id
+        notes: list[str] = []
         if note is not None:
-            fields["note"] = note
+            fields["note"] = protected(note, notes)
         if color is not None:
             fields["color"] = color or None
         if icon is not None:
@@ -1157,6 +1823,8 @@ async def update_category_or_project(
             fields["priority"] = priority or None
         if frog is not None:
             fields["isFrogged"] = frog or False
+        if size is not None:
+            fields["taskSize"] = size_value(size)
         if label_ids is not None:
             fields["labelIds"] = label_ids
         if backburner is not None:
@@ -1168,7 +1836,15 @@ async def update_category_or_project(
         if not fields:
             return {"error": "No fields to update were given."}
         result = await get_client().update_doc(item_id, make_setters(fields))
-        return {"updated": result}
+        out: dict[str, Any] = {"updated": result}
+        if notes:
+            out["notes"] = notes
+        if note is not None:
+            out["note_page"] = (
+                "If the project/category has a notebook, note is written to its first page; "
+                "if the notebook has no pages the server creates page 1."
+            )
+        return out
     except Exception as e:
         return tool_error(e)
 
@@ -1595,44 +2271,46 @@ async def get_reminders() -> dict:
 
 @mcp.tool(annotations=ADDITIVE)
 async def set_reminder(
-    title: Annotated[str, Field(description="Text shown in the notification (max 200 chars)")],
     time_unix_seconds: Annotated[int, Field(description="Unix time (seconds) for the reminder")],
-    reminder_id: Annotated[
+    task_id: Annotated[
         str | None,
-        Field(description="Custom ID; randomized otherwise. Do NOT use a task ID here — see description."),
+        Field(description="The task's id: the reminder is added to the task in the app's form. Omit for a standalone reminder"),
+    ] = None,
+    title: Annotated[
+        str | None, Field(description="Notification text (max 200 chars). Standalone: required. On a task: the task's title is used")
     ] = None,
 ) -> dict:
-    """Set a standalone push reminder to the phone.
-    Times on tasks are set in the app, not here.
-    Set a standalone push reminder (type 'M', requires the Marvin mobile
-    app to be logged in). WARNING — data integrity: a task reminder in Marvin
-    consists of TWO writes that only the app keeps in sync — reminder fields
-    on the task document itself (taskTime, reminderTime, reminderOffset,
-    snooze, autoSnooze) AND a server-side entry via /reminder/set. This tool
-    only writes the server-side entry. Setting reminder_id to a task ID
-    therefore does NOT link the reminder to the task in the app's UI, and
-    risks an orphaned/inconsistent server-side entry (only visible through
-    get_reminders). Task-linked reminders are set in the Marvin app; use
-    this tool for standalone reminders only.
-    Facts about time on tasks (live data 2026-09-02): the Time field in the
-    app (taskTime) is a clock time that — with auto-created reminders
-    enabled in the user's settings — automatically becomes a reminder at
-    the same time (reminderTime = the clock time, offset 0); Time and
-    reminder are in practice the same thing there. That this MCP does not
-    set times on tasks is therefore an MCP limitation, never a Marvin
-    limitation."""
+    """Set an own reminder on a task, or a standalone reminder.
+    With task_id the reminder is written in the app's form: an entry in the
+    task's reminders list (reminderId of 13 characters, time in seconds)
+    and a server entry of type M with taskId — the app shows it under
+    Reminders and the notification arrives, and mark_done/delete_task clean
+    it up. A clock time on a task is set with update_task(time=...).
+    Without task_id a standalone server entry of type M is written
+    (requires Marvin's mobile app for the notification)."""
     try:
+        c = Chain()
+        if task_id:
+            doc = await read_doc(c, task_id, "read the task")
+            rid = tr.rid13()
+            new_list = list(doc.get("reminders") or []) + [{"reminderId": rid, "time": time_unix_seconds}]
+            await c.step("add to reminders", lambda: get_client().update_doc(task_id, make_setters({"reminders": new_list})))
+            post = tr.server_m(task_id, rid, doc.get("title") or title or "", time_unix_seconds)
+            await c.step("write the server entry", lambda: get_client().set_reminders([post]))
+            return {"reminder_id": rid, "task_id": task_id, "completed_steps": c.completed}
+        if not title:
+            return {"error": "A standalone reminder requires title."}
         reminder = {
             "time": time_unix_seconds,
             "offset": 0,
-            "reminderId": reminder_id or str(uuid.uuid4()),
+            "reminderId": tr.rid13(),
             "type": "M",
             "title": title[:200],
             "snooze": 9,
             "autoSnooze": False,
             "canTrack": False,
         }
-        return {"result": await get_client().set_reminders([reminder])}
+        return {"result": await get_client().set_reminders([reminder]), "reminder_id": reminder["reminderId"]}
     except Exception as e:
         return tool_error(e)
 
@@ -1640,15 +2318,26 @@ async def set_reminder(
 @mcp.tool(annotations=DESTRUCTIVE)
 async def delete_reminder(
     reminder_ids: Annotated[list[str], Field(description="IDs of reminders to delete")],
+    task_id: Annotated[
+        str | None,
+        Field(description="The task's id when the reminders belong to a task: they are then also removed from the reminders list"),
+    ] = None,
 ) -> dict:
-    """Delete one or more server-side reminders.
-    Note: for a reminder that
-    belongs to a task (set in the app), only the server-side entry is removed
-    — the task document's reminder fields are not cleared, so the app may
-    show it as active and recreate it. Prefer using this against standalone
-    reminders (type 'M') or to clean up orphaned entries from get_reminders."""
+    """Delete reminders, also from the task's list when task_id is given.
+    With task_id the entries are removed from the task's reminders list and
+    from the server (both are needed; an entry left in the list makes an
+    open client notify). Without task_id only the server entries are
+    removed — use it for standalone reminders or orphaned entries from
+    get_reminders. The clock time's reminder (type T) is removed with
+    update_task(time='')."""
     try:
-        return {"result": await get_client().delete_reminders(reminder_ids)}
+        c = Chain()
+        if task_id:
+            doc = await read_doc(c, task_id, "read the task")
+            kept = [r for r in (doc.get("reminders") or []) if r.get("reminderId") not in set(reminder_ids)]
+            await c.step("remove from reminders", lambda: get_client().update_doc(task_id, make_setters({"reminders": kept})))
+        result = await c.step("remove the server entries", lambda: get_client().delete_reminders(reminder_ids))
+        return {"result": result, "completed_steps": c.completed}
     except Exception as e:
         return tool_error(e)
 
@@ -1688,36 +2377,65 @@ async def get_account_info() -> dict:
 
 @mcp.tool(annotations=READONLY)
 async def get_rate_limit_status() -> dict:
-    """Show today's Marvin API calls against the 1440/day budget.
+    """Show today's Marvin calls against the budget and the last call time.
     Show how many Marvin API calls have been made today (budget 1440/day,
-    shared by all tools)."""
-    return {
+    shared by all tools) and when the latest one went out. The counter is
+    shared by every client that goes through this server. If a call went
+    out within the last minute, another client is active. This tool costs
+    no Marvin call."""
+    out: dict[str, Any] = {
         "calls_today": _limiter.calls_today if _limiter else 0,
         "daily_limit": 1440,
     }
+    last = _limiter.last_call_at if _limiter else None
+    if last is None:
+        out["last_call_at"] = None
+    else:
+        out["last_call_at"] = datetime.fromtimestamp(last, TIMEZONE).strftime("%Y-%m-%d %H:%M:%S %Z")
+        out["seconds_since_last_call"] = max(0, int(time.time() - last))
+    return out
 
 
 # Capability overview. tests/test_discoverability.py requires every registered
 # tool to be listed here.
 CAPABILITIES: list[tuple[str, list[tuple[str, str, str | None]]]] = [
     ("Tasks", [
-        ("create_task", "Create a task: category, day, deadline, priority, frog, labels, estimate, note, sections, planned week/month, review date, backburner, reward points",
-         "startDate/endDate, orbit/noAutoOrbit (set with update_task afterwards); a time/reminder on the task (set in the app)"),
-        ("update_task", "Change title, note, day, deadline, labels, estimate, sections, start/end date, planned week/month, review date, backburner, orbit, snooze, time block",
-         "time (taskTime) and the task's reminder fields (app); recurrence rules (app); completion (mark_done)"),
-        ("set_priority", "Priority P1-P3/low (isStarred 3/2/1/-1) and frog on a task", None),
-        ("mark_done", "Complete a task via /markDone (kudos, duration, times are set)", "projects (completed in the app); reward points are not awarded automatically (claim_reward_points)"),
-        ("unmark_done", "Undo a completion (done=false, doneAt cleared)", "kudos are not adjusted back"),
-        ("delete_task", "Delete a document permanently via the API", "undo (the trash is client-side); an open client does not render the deletion until reloaded"),
-        ("get_today_items", "Open tasks/projects with day <= date (rollover)", "recurring instances before the app has run; deadline-only items (get_due_items)"),
-        ("get_due_items", "Open tasks/projects with deadline <= today", None),
+        ("create_task", "Create a task: category, day, deadline, priority, frog 1-4, size, subtasks, clock time, own reminders, labels, estimate, note, sections, planned week/month, review date, backburner, reward points",
+         "startDate/endDate, orbit/noAutoOrbit (set with update_task afterwards)"),
+        ("update_task", "Change title, note, day (moves the clock time's reminder as the app does), clock time, own reminders, size, subtasks (add, check off, rename), deadline, labels, estimate, sections, date fields, backburner, orbit, snooze, time block",
+         "recurrence rules (update_recurring_task); completion (mark_done)"),
+        ("set_priority", "Priority P1-P3/low (isStarred 3/2/1/-1) and dread/frog 1-4 on a task", None),
+        ("mark_done", "Complete a task; cleans up reminders as the app does; records the habit on habit tasks (with a count: checked off when the target is reached)", "projects (mark_project_done); reward points are not awarded automatically"),
+        ("mark_project_done", "Close a project in two steps: list open children with a code, then check them off and close the project with the app's fields",
+         "sub-projects, habit tasks and occurrences among the children (close them first); workedOnAt on the children (which the app sets); undo (the app); kudos for the project"),
+        ("unmark_done", "Undo a completion and the habit's record (if it is the task's)", "projects (reopened in the app); kudos; the clock time's reminder is not restored (as in the app); a partial record on an open habit task — use record_habit undo"),
+        ("delete_task", "Delete permanently; clears reminders first; scope=all deletes a recurring task (via an occurrence or its own id) with its open occurrences; projects and categories only without open children", "undo; habit recurrences; projects with open children; the project's notebook (delete_notebook); an open client shows the row until reloaded"),
+        ("get_today_items", "Open items with day <= date; hides occurrences as the app does (If you miss one)", "recurring occurrences before a Marvin client has opened after the day rolled over"),
+        ("get_due_items", "Open items with deadline <= date; hides Keep just one as the app does", None),
         ("get_done_items", "Tasks completed on a date (doneAt), with lookback", "projects"),
+    ]),
+    ("Recurring tasks", [
+        ("create_recurring_task", "All eleven types, Create occurrences, If you miss one, hard deadline, start/end, only weekdays, sections, label, priority, size, note, subtasks; After completion with the first occurrence; custom recurrence as RRULE strings only (rules in words are refused)",
+         "occurrences right away (the app creates them at the first client start after the day rolls over); reminder/frog on a recurring task"),
+        ("update_recurring_task", "Rule, window, place, end date, properties; cleanup of occurrences that no longer fit (list, remove with confirm)",
+         "correcting existing occurrences; switching to/from After completion; custom rules in words (RRULE strings only) and cleanup for Only on weekdays"),
+    ]),
+    ("Notebooks", [
+        ("get_notebooks", "All notebooks with page titles, order and sections; parent_missing/parent_done when the parent is deleted or done. Cost: 2 calls plus one per parent missing from /categories", "page text (get_notebook)"),
+        ("get_notebook", "One notebook with page text, via notebook, parent or page id; a 404 on parent_id returns an error suggesting notebook_id", None),
+        ("search_notebooks", "Search names, page titles and text (cached, at most 20 fetches per call)", None),
+        ("create_notebook", "Standalone notebook with sections", "a notebook directly on a project (formed when a page is moved)"),
+        ("update_notebook", "Name (standalone) and sections: create, rename, remove", "renaming a notebook that has a parent"),
+        ("delete_notebook", "Delete a notebook and its pages; two steps when there is text; page 1 goes back as the note", "undo (no trash via the API)"),
+        ("create_notebook_page", "New page last, optional section", None),
+        ("update_notebook_page", "Text, append, title, order, section, move to a notebook or project/category", "moving the parent's first page out"),
+        ("delete_notebook_page", "Delete a page; confirmation if it has text", "the last page in a notebook with a parent (delete_notebook)"),
     ]),
     ("Structure", [
         ("get_categories", "The whole hierarchy of categories and projects", None),
-        ("get_children", "Direct children (open tasks, subprojects) of a category/project", "completed tasks; orphans; deeper levels in one call"),
+        ("get_children", "Direct children (open tasks, subprojects) of a category/project", "completed tasks; orphans; deeper levels in one call; does not filter hidden occurrences"),
         ("create_category_or_project", "Category or project with color, icon, labels, note; projects also day/deadline/priority/frog", "day/deadline/priority/frog on a category (structural rule); '#' in project titles"),
-        ("update_category_or_project", "Labels (categories AND projects), color, icon, note, parent, planned week/month, review/start/end date, orbit; projects also day/deadline/priority/frog", "day/deadline/priority/frog on a category; completing projects"),
+        ("update_category_or_project", "Labels, color, icon, note (page 1 if a notebook exists), parent, date fields, orbit; projects also day/deadline/priority/frog/size", "day/deadline/priority/frog/size on a category; completing projects (mark_project_done)"),
         ("convert_category_or_project", "Switch type project<->category in place, losslessly", "a category with subcategories -> project"),
         ("get_labels", "All labels with id and group", "creating/editing labels (app)"),
         ("get_goals", "All goals with status and check-ins", "creating/editing goals (app)"),
@@ -1733,7 +2451,7 @@ CAPABILITIES: list[tuple[str, list[tuple[str, str, str | None]]]] = [
         ("get_tracked_item", "The task being time-tracked right now", None),
         ("start_tracking", "Start time tracking on a task", None),
         ("stop_tracking", "Stop time tracking; the time lands in /tracks", "updating the task's own times/duration (only mark_done does that)"),
-        ("get_time_tracks", "Tracking history for up to 100 tasks", None),
+        ("get_time_tracks", "Tracking history for up to 100 tasks", "per day"),
     ]),
     ("Rewards", [
         ("get_kudos", "Kudos, level, kudosRemaining", "nextMultiplier (only in /me)"),
@@ -1744,8 +2462,8 @@ CAPABILITIES: list[tuple[str, list[tuple[str, str, str | None]]]] = [
     ]),
     ("Reminders", [
         ("get_reminders", "All server-side reminders", None),
-        ("set_reminder", "Standalone push reminder to the phone", "a reminder/time on a task (set in the app; two-write sync)"),
-        ("delete_reminder", "Delete server-side reminders", "the task's own reminder fields (the app may recreate)"),
+        ("set_reminder", "Own reminder on a task in the app's form, or standalone", "clock time (update_task time)"),
+        ("delete_reminder", "Delete reminders, also from the task's list with task_id", "the clock time's reminder (update_task time='')"),
     ]),
     ("Calendar", [
         ("create_event", "Calendar event (experimental), synced onwards by the app", "reading/editing events"),
@@ -1753,21 +2471,28 @@ CAPABILITIES: list[tuple[str, list[tuple[str, str, str | None]]]] = [
     ("Account and operations", [
         ("test_connection", "Check that the API token works", None),
         ("get_account_info", "Account info (/me): email, tracking status, points balance", None),
-        ("get_rate_limit_status", "Today's calls against the 1440/day budget", None),
+        ("get_rate_limit_status", "Today's calls against the 1440/day budget and the time of the last call (all clients of the server)", "calls that bypass the server"),
         ("list_capabilities", "This overview", None),
     ]),
 ]
 
 CANNOT_VIA_MCP: list[str] = [
-    "A time (Time/taskTime) or reminder on a task — set in the app (two-write sync; an MCP limitation, not a Marvin limitation)",
-    "Recurrence rules for recurring tasks — the app",
-    "Completing projects — the app",
     "Creating or editing labels, goals, habits, smart lists and strategies — the app",
+    "Correcting occurrences that already exist after a rule change via the API — the API does not, and neither does saving in the app afterwards; the app's dialog does it on a rule change made there",
+    "Reminder, clock time and frog on recurring tasks, recurring projects, attachments, the archive, day notes, webhooks — not supported",
     "Reading the app's Rewards (rewards to buy) — no endpoint",
     "Undoing an API deletion — the app's trash is not reachable",
     "Undoing a MANUAL reward-point award — the server keeps no record",
     "Section strategies (time block/custom/daily/bonus) show in Today only if the strategy is on AND the day view is grouped by that section (per device)",
 ]
+
+NOTE_FORMAT: dict[str, Any] = {
+    "rule": "Bullet lists with '*', checklists with '- [ ]'. A list where '- ' bullets and '- [ ]' meet is deleted entirely when the app saves the text.",
+    "auto_protection": "'- ' at line start is written as '* ' by the tools; '- [ ]', '- [x]', '---', indentation and code blocks are left untouched.",
+    "renders": "Headings, '*' bullets, numbered lists, tables, :::warning box, page break (***), quotes and code blocks (read off a notebook page).",
+    "app_rewrites": "The app tidies the text when it saves: blank lines, table separators and trailing '\\' — differences from what was written are not edits.",
+    "limits": "Images cannot be uploaded via the API; a page holds up to 750 kB.",
+}
 
 
 @mcp.tool(annotations=READONLY)
@@ -1784,5 +2509,11 @@ async def list_capabilities() -> dict:
         "tool_count": sum(len(t) for _, t in CAPABILITIES),
         "areas": areas,
         "cannot_via_mcp": CANNOT_VIA_MCP,
+        "note_format": NOTE_FORMAT,
         "note": "Field conditions, live-tested limitations and dates live in each tool's description; docs/field-reconciliation.md carries the per-field reference.",
     }
+
+
+# The notebook and recurring-task tools live in their own modules but are
+# registered on the same server. Imported last: the modules read names from here.
+from . import tools_notebooks, tools_recurring  # noqa: E402,F401

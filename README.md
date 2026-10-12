@@ -4,7 +4,7 @@
 
 An MCP ([Model Context Protocol](https://modelcontextprotocol.io)) server for
 [Amazing Marvin](https://amazingmarvin.com) with **complete coverage of the
-public API**: 38 tools over all ~31 documented endpoints (plus the
+public API**: 50 tools over all ~31 documented endpoints (plus the
 undocumented `/doneItems`), a global rate
 limiter that respects Marvin's documented limits, least-privilege token
 routing, and MCP tool annotations. As of 1.1.0 every writable field in
@@ -24,12 +24,14 @@ which may be useful even if you never run this server.
 > you through setup and troubleshooting far faster than I can. Provided
 > as-is, without guarantees — it's MIT, fork freely.
 
-## Tools (38)
+## Tools (50)
 
 | Group | Tools |
 |---|---|
-| Core | `test_connection`, `create_task`, `mark_done`, `unmark_done`, `update_task`, `set_priority`, `delete_task` |
+| Core | `test_connection`, `create_task`, `mark_done`, `mark_project_done`, `unmark_done`, `update_task`, `set_priority`, `delete_task` |
 | Reading | `get_today_items`, `get_due_items`, `get_done_items`, `get_children`, `get_categories` |
+| Recurring tasks | `create_recurring_task`, `update_recurring_task` |
+| Notebooks | `get_notebooks`, `get_notebook`, `search_notebooks`, `create_notebook`, `update_notebook`, `delete_notebook`, `create_notebook_page`, `update_notebook_page`, `delete_notebook_page` |
 | Structure | `create_category_or_project`, `update_category_or_project`, `convert_category_or_project` (experimental) |
 | Habits | `list_habits`, `get_habit`, `record_habit` |
 | Time blocks | `get_today_time_blocks`, `create_time_block` (experimental) |
@@ -46,16 +48,20 @@ The server also sends a short `instructions` text at `initialize` (shown by
 Claude Code, not by the claude.ai clients). The first line of every tool
 description is a whole sentence of at most 75 characters stating the
 capability — the clients show only that line in their catalog; the test
-`tests/test_discoverability.py` guards it.
+`tests/test_discoverability.py` guards it. The same test keeps every
+description and the `instructions` text under 2,048 characters — Claude Code
+silently truncates longer text since v2.1.280.
 
 | Area | Can via MCP | Cannot via MCP (done in the app) |
 |---|---|---|
-| Tasks | create/update/complete/delete, priority and frog, day, deadline, labels, estimate, note, sections, planned week/month, review date, backburner, orbit, snooze, time block; read today's, due and done | a time/reminder on the task (taskTime), recurrence rules, startDate at creation (update_task afterwards) |
-| Structure | the hierarchy, children, create/update/convert categories and projects, labels on both, color, icon, note; read labels and goals | creating/editing labels, goals, smart lists, strategies; completing projects |
-| Habits | list, tracking record, record/undo | creating/editing habits |
+| Tasks | create/update/complete/delete, priority and frog 1–4, size, subtasks, a time of day and own reminders in the app's form, day, deadline, labels, estimate, note, sections, planned week/month, review date, backburner, orbit, snooze, time block; complete a project with its open tasks (two steps); read today's, due and done, filtered as the app shows them | startDate at creation (update_task afterwards); fixing occurrences that already exist; reopening a completed project |
+| Recurring tasks | create all eleven types (custom only as an RRULE string), change rule/window/place/properties, clean up occurrences that no longer fit (list, confirm) | reminders/frog on recurring tasks, recurring projects, custom rules in words |
+| Notebooks | list, read, search, create, rename, sections, pages: create/edit/move/delete, delete a notebook in two steps | undo (no trash via the API) |
+| Structure | the hierarchy, children, create/update/convert categories and projects, labels on both, color, icon, note; read labels and goals | creating/editing labels, goals, smart lists, strategies |
+| Habits | list, tracking record, record/undo; habit tasks are recorded on mark_done and undone on unmark_done | creating/editing habits |
 | Time | today's time blocks with mapping, create a block, time tracking start/stop/history | the smart-time-block mapping on a block |
 | Rewards | kudos, award/undo/spend/reset reward points | undoing a MANUAL award; reading the app's Rewards |
-| Reminders | server-side reminders: list, set standalone, delete | task-linked reminders (two-write sync) |
+| Reminders | own reminders on a task (list + server entry), standalone, delete; time of day via update_task | — |
 | Calendar | create an event (experimental) | reading/editing events |
 | Account | test, account info, call budget, capability overview | — |
 
@@ -153,16 +159,23 @@ most containers).
 
 ### Rate limiting
 
-Marvin's documented limits — 1 write/second, 1 read/3 seconds, 1440
-calls/day — are enforced by a single process-global queue shared by all
-tools and sessions, with margin (1.1 s / 3.1 s). The daily counter persists
-across restarts (`STATE_DIR`) and rolls over at midnight in the configured
-timezone. `get_rate_limit_status` shows today's usage.
+Marvin's documented limits — no bursts faster than one request every 3
+seconds, bulk creation at one per second, 1440 calls/day — are enforced by a
+single process-global queue shared by all tools and sessions, with margin:
+only creating calls (`/addTask`, `/addProject`, `/addEvent`, `/doc/create`)
+use 1.1 s; everything else (reads, updates, `/markDone`, deletions) waits
+3.1 s. The spacing is set by the kind of the call about to be made. After a
+429 all calls pause 60 s (or Retry-After). The daily counter and the time of
+the last call persist across restarts (`STATE_DIR`) and the counter rolls
+over at midnight in the configured timezone. `get_rate_limit_status` shows
+today's usage and how long ago the last call went out. Multi-step tools
+(chains) retry a step once after a 500 or 429 and report which steps were
+done if they still fail.
 
 ## Marvin API quirks & findings
 
 Everything below was verified against the live API (2026-08-19 through
-2026-08-29). This is the half of the repo you can use without running it.
+2026-10-12). This is the half of the repo you can use without running it.
 
 **Habits**
 - Non-raw `GET /habits` does **not** read your habit documents. It reads a
@@ -229,13 +242,12 @@ Everything below was verified against the live API (2026-08-19 through
   `color`/`icon` (set them via `update_category_or_project`), and
   `/addTask` silently drops `noAutoOrbit` (live-tested 2026-09-13) — set it
   with `update_task` after creating the task.
-- A clock time on a task (Time/`taskTime`) is set in the app, not via this
-  MCP — a deliberate MCP choice (the double-write sync, see
-  `set_reminder`), NOT a Marvin limitation: Marvin fully supports times on
-  tasks, and with auto-created reminders a set Time automatically becomes
-  a reminder at the same time (live data 2026-09-02). Reading the fields
-  works. The phrasing "you cannot set a time on a task" is therefore wrong
-  about Marvin — it only holds for the MCP write path.
+- A clock time on a task (Time/`taskTime`) is fully supported by Marvin,
+  and with auto-created reminders a set Time automatically becomes a
+  reminder at the same time (live data 2026-09-02). Until 1.8.0 this MCP
+  left it to the app; since 1.8.0 the tools write it in the app's own form
+  (fields and server entries together — see **Reminders and time of day**
+  below).
 - Projects are prioritized with the string field `priority`
   (`"high"`/`"mid"`/`"low"`), not `isStarred` like tasks (live-tested
   2026-08-29) — which is why `set_priority` is task-only. Mapping (verified
@@ -348,7 +360,7 @@ Everything below was verified against the live API (2026-08-19 through
   `/reminder/set`. Writing only one side (all the API lets you do
   comfortably) produces entries the app UI won't show on the task, or
   server-side orphans. Standalone reminders (type `M`) are the safe use of
-  the API. (Risk first documented by
+  the raw API; since 1.8.0 the tools write both sides the way the app does. (Risk first documented by
   [Recon2026/marvin-mcp](https://github.com/Recon2026/marvin-mcp);
   confirmed by the official wiki's own warning.)
 
@@ -377,8 +389,10 @@ Everything below was verified against the live API (2026-08-19 through
   "Show Custom Icon On" includes projects — "Categories & Projects"
   (verified 2026-08-31) or "Just Projects" (verified 2026-09-18); the
   earlier "projects never render an own icon" was our own test error.
-- A project's `timeEstimate` renders as its own estimate; the UI does
-  not aggregate it with the children's estimates, despite the wiki's claim.
+- A project's own `timeEstimate` takes precedence; without one the project
+  shows the sum of its children's estimates (per Marvin support's reply to
+  our report — our earlier "no aggregation" came from a mis-designed test
+  that set estimates on both the project and its children).
 - Snoozed tasks (`itemSnoozeTime`) are hidden from the category view too —
   the wiki's "everywhere except the master list" doesn't hold there.
 - `timeBlockSection` links a task to a time block's section in Today — but
@@ -406,6 +420,68 @@ Everything below was verified against the live API (2026-08-19 through
   have labels in the same field as projects, and an API-set label is
   stored and rendered (live-tested + verified in the app 2026-09-11), so
   `label_ids` is allowed on categories since 1.6.0.
+
+**Recurring tasks and occurrences** (live-tested 2026-10-09 to 2026-10-11)
+- Occurrences have the id `YYYY-MM-DD_<recurringTaskId>`; an occurrence
+  created by ticking off an *after completion* task gets a random id, and
+  only the first one is written via the API (`echo: true`, `echoId: null`).
+  The next one after `/markDone` lands on day + `echoDays`.
+- `createAhead` missing or `null` = the account's default. The app shows a
+  `custom` rule correctly only as an RRULE string, so the tools accept only
+  RRULE (rules in words like "every other friday" are refused).
+- Deleting one occurrence the way the app's *Just this one* does adds its
+  ISO date to the recurring task's `deletedDates`.
+- With *Only on weekdays*, a month day on a weekend moves to Friday.
+- Occurrences inherit labels, priority, size, note, sections, subtasks (id
+  `<day>_<subid>`) and `dueIn` → `dueDate`.
+
+**Notebooks**
+- `GET /notebook?parentId=` answered 404 "Notebook not found" 5 and 12 s
+  after the notebook was created with `/doc/create`, while `?id=` answered
+  200 at the same time (cause unknown). `get_notebook` with `parent_id`
+  then returns an error suggesting `notebook_id`.
+- A project's `notePageId` is computed by the server from the page with the
+  lowest `rank`; writing the project's `note` writes that page.
+- Deleting a project in the app (with its notes) leaves its notebook and
+  page on the server — still listed by `/notebooks` and
+  `/notebook?parentId=`. `get_notebooks` flags such notebooks
+  `parent_missing` (and `parent_done` for a done project).
+
+**Reminders and time of day**
+- A clock time = `taskTime` "HH:MM" + `reminderTime` (seconds) and friends
+  on the task, plus a server entry of type `T` whose `reminderId` is the
+  task's id. Own reminders = a `reminders` list on the task plus one type
+  `M` entry each.
+- Completing a task in the app removes `T` and `M` on the server; undoing
+  the completion does not put `T` back, while `M` still notifies. Before
+  deleting a task with reminders, delete its server entries too, or an
+  open client keeps reminding.
+
+**Habits**
+- `/updateHabit` with `undo` always removes the *latest* history entry; if
+  `time` is sent with it, `[time, 0]` is appended as well. Never send
+  `time` with `undo`.
+- A recording below a numeric target writes nothing on the habit task
+  (`habitRepAt` stays null).
+
+**Completing projects and other document behavior**
+- When the app completes a project it writes `done`, `doneAt` =
+  `workedOnAt`, `day` (today if unset) and `doneDate` = `day` in one
+  stamped write, and refuses while children are open.
+  `mark_project_done` mirrors this.
+- `/categories` does not list done projects.
+- `/markDone` sets no `workedOnAt` and stamps no `fieldUpdates`; on a task
+  without a day it sets `day` to today, also unstamped.
+- `GET /doc` on a deleted document answers 200 with
+  `{"error":"not_found","reason":"deleted"}`; `/doc/update` on it gives 500.
+- `/addTask` drops `taskSize` (XS–XL = 1–5); it is written afterwards with
+  `/doc/update`.
+
+**Rate limits**
+- Getting started says "No bursts faster than 1 request every 3 seconds".
+  The limiter spaces creates (`/addTask`, `/addProject`, `/addEvent`,
+  `/doc/create`) 1.1 s and everything else 3.1 s, keyed on the *upcoming*
+  call's kind.
 
 ## How this differs from existing alternatives
 
