@@ -530,7 +530,7 @@ materially shaped it:
   confirmed, partly refuted — see the `#Category` finding), and the idea of
   MCP tool annotations.
 
-Built with [Claude Code](https://claude.com/claude-code) (Claude Fable 5).
+Built with [Claude Code](https://claude.com/claude-code) (Claude Fable 5, Fable 5.1 and Opus 5.5).
 
 ## License
 
